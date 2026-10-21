@@ -1,0 +1,6 @@
+# SHA-256 of home-ui images confirmed working on a real LPM-10C, one per line, with a note.
+# The release workflow says in the notes whether the image it built is one of these.
+# Add a line only after installing that exact image and checking it on a tester.
+11a9c60ecb7da02e7f668fc96aa24134ed7755d50c288604fee7fb9815cb8258  2026-10-20 Link status with DNS lookup, pictures reclaimed
+ef571cf364129ebe34e9ba349ad57b3dd8000d80a47d1c87050c60eba4f7ffc5  2026-10-20 scrolling, DNS answer, IPv6 checks
+efa2eff883b69a199e02b7df09797c4afd1b3784d0c37aa584c4c99b5a8035e6  2026-10-20 port arrow in Link status
