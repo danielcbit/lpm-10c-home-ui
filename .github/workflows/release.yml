@@ -17,12 +17,12 @@ jobs:
       - id: setup
         uses: ./.github/actions/setup
         with:
-          vendor-zip-url: ${{ vars.VENDOR_ZIP_URL }}
+          vendor-zip-url: ${{ vars.VENDOR_ZIP_URL || 'https://www.fnirsi.com.cn/uploads/file1/20261010/d68467f735b832bc57860df7f230ada41791625743186.zip' }}
 
       - name: Require the vendor image
         if: steps.setup.outputs.vendor != 'true'
         run: |
-          echo "::error::Set the repository variable VENDOR_ZIP_URL to the official FNIRSI LPM-10C update .zip"
+          echo "::error::The official FNIRSI update could not be fetched; set the repository variable VENDOR_ZIP_URL to its current URL"
           exit 1
 
       - name: Tests

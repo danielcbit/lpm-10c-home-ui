@@ -175,13 +175,16 @@ Releases contain **no FNIRSI firmware**. Each one contains a patch file
 released image from your own copy of the official update, and refuses to run
 unless both the input and the result match the expected SHA-256.
 
-1. Download the official **LPM-10C V2.0.7** update `.zip` from FNIRSI's support
-   site. Keep it: it is also how you go back.
+1. Download the official **LPM-10C V2.0.7** update from FNIRSI:
+   <https://www.fnirsi.com.cn/uploads/file1/20261010/d68467f735b832bc57860df7f230ada41791625743186.zip>
+   (SHA-256 `6dfea6eef1f8ec5c4630b63690d3730fe6f2a76a9a4b094008a871de3d28c746`).
+   It holds both the LPM-10A and the LPM-10C firmware; the tool picks the
+   LPM-10C transmitter image. Keep the zip: it is also how you go back.
 2. From the [latest release](../../releases/latest), download the
    `.patch.json` and `lpm_patch.py`.
 3. Run (Python 3.8 or later, standard library only):
    ```sh
-   python3 lpm_patch.py apply LPM-10C.zip lpm-10c-home-ui-vX.Y.Z.patch.json
+   python3 lpm_patch.py apply d68467f735b832bc57860df7f230ada41791625743186.zip lpm-10c-home-ui-vX.Y.Z.patch.json
    ```
    This writes `LPM-10C_TX_V2.0.7_260907.bin`. Do not rename it.
 4. On **Windows**: turn the tester off, hold **M** and power it on. Copy the file
@@ -189,8 +192,9 @@ unless both the input and the result match the expected SHA-256.
 5. The tester restarts into the new home screen. Settings are kept: they live
    in a flash page the update does not touch.
 
-**Going back.** Install the unmodified `LPM-10C_TX_V2.0.7_260907.bin` from the
-FNIRSI zip the same way. The bootloader is not modified, so BOOT mode stays
+**Going back.** Install the unmodified `LPM-10C_TX_V2.0.7_260907.bin` the same
+way. It is in `LPM-10C.zip` inside the FNIRSI download, or
+`python3 lpm_patch.py extract <zip> --out .` writes it. The bootloader is not modified, so BOOT mode stays
 available even if the application fails to start.
 
 The release notes say whether the exact image was confirmed on a real tester
@@ -208,7 +212,8 @@ Exact versions are in [CONTRIBUTING.md](CONTRIBUTING.md#setup).
 ```sh
 brew install llvm@22 lld                                  # macOS; elsewhere use the LLVM release and set CLANG
 python3 -m venv .venv && .venv/bin/pip install unicorn==2.1.4 capstone==5.0.7
-python3 scripts/lpm_patch.py extract path/to/LPM-10C.zip  # checks the vendor image and puts it in firmware/extracted/
+curl -fLO https://www.fnirsi.com.cn/uploads/file1/20261010/d68467f735b832bc57860df7f230ada41791625743186.zip
+python3 scripts/lpm_patch.py extract d68467f735b832bc57860df7f230ada41791625743186.zip  # checks the vendor image, puts it in firmware/extracted/
 python3 scripts/build_patched_image.py home-ui            # -> firmware/patched/home-ui/LPM-10C_TX_V2.0.7_260907.bin
 make test PYTHON=.venv/bin/python                         # C tests, script tests, 29 emulated network scenarios
 ```
@@ -220,10 +225,10 @@ say whether a CI build matches a confirmed image.
 **CI and releases.** `.github/workflows/ci.yml` runs the tests on every push and
 pull request. `.github/workflows/release.yml` runs on `v*` tags: it builds,
 tests, writes the patch and publishes a GitHub release with that version's
-section of `CHANGELOG.md` and the build hashes. Both need the repository
-variable **`VENDOR_ZIP_URL`**, a URL of the official FNIRSI LPM-10C update
-`.zip`. The workflows check the SHA-256 of the image inside it and never upload
-it. Without the variable, CI runs only the tests that need no vendor firmware.
+section of `CHANGELOG.md` and the build hashes. Both download the official
+FNIRSI update from the URL above (the repository variable **`VENDOR_ZIP_URL`**
+overrides it if FNIRSI moves the file), check the SHA-256 of the TX image inside
+it, and never upload it.
 
 ## Development tools
 

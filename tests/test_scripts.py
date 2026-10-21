@@ -172,6 +172,19 @@ class ReleasePatchTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.apply(self.vendor[:-1] + b'\x00', self.patch)
 
+    def test_vendor_image_is_found_inside_the_nested_fnirsi_zip(self):
+        import io
+        import zipfile
+        inner = io.BytesIO()
+        with zipfile.ZipFile(inner, 'w') as z:
+            z.writestr('LPM-10C/LPM-10C_V2.0.7/' + lpm_patch.VENDOR_NAME, self.vendor)
+        with tempfile.TemporaryDirectory() as tmp:
+            outer = Path(tmp) / 'download.zip'
+            with zipfile.ZipFile(outer, 'w') as z:
+                z.writestr('folder/LPM-10A.zip', b'not this one')
+                z.writestr('folder/LPM-10C.zip', inner.getvalue())
+            self.assertEqual(lpm_patch.read_vendor(outer), self.vendor)
+
     def test_apply_refuses_a_patch_whose_result_does_not_match(self):
         self.patch['output_sha256'] = '0' * 64
         with self.assertRaises(SystemExit):

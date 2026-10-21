@@ -61,9 +61,9 @@ def main():
 This release does not contain FNIRSI's firmware. It contains a patch for the
 official **LPM-10C V2.0.7** update, which you download from FNIRSI yourself.
 
-1. Download the LPM-10C V2.0.7 update `.zip` from FNIRSI.
+1. Download the LPM-10C V2.0.7 update from FNIRSI: <https://www.fnirsi.com.cn/uploads/file1/20261010/d68467f735b832bc57860df7f230ada41791625743186.zip>
 2. Download `{patch_file.name}` and `lpm_patch.py` from this release.
-3. Run `python3 lpm_patch.py apply LPM-10C.zip {patch_file.name}`. It checks the vendor
+3. Run `python3 lpm_patch.py apply d68467f735b832bc57860df7f230ada41791625743186.zip {patch_file.name}`. It checks the vendor
    file, applies the patch, checks the result and writes `{patch["output_name"]}`.
 4. Install it **from Windows**: hold **M** while powering on the transmitter, copy the file
    to the drive that appears, and wait for it to restart. Do not update from macOS (FNIRSI's

@@ -1,11 +1,11 @@
 name: Set up the build
 description: >
   LLVM (clang and ld.lld for the Cortex-M4 code), Python with unicorn and capstone,
-  and, when the repository variable VENDOR_ZIP_URL is set, the official FNIRSI
+  and, when a vendor URL is given, the official FNIRSI
   LPM-10C V2.0.7 update, checked by SHA-256 and extracted where the build expects it.
 inputs:
   vendor-zip-url:
-    description: URL of the official FNIRSI LPM-10C update .zip (repository variable VENDOR_ZIP_URL)
+    description: URL of the official FNIRSI LPM-10C update .zip (the workflows pass vars.VENDOR_ZIP_URL or the FNIRSI URL)
     required: false
     default: ''
   llvm-version:
@@ -66,7 +66,7 @@ runs:
       run: |
         set -euo pipefail
         if [ -z "$VENDOR_ZIP_URL" ]; then
-          echo "::notice::VENDOR_ZIP_URL is not set: firmware build and emulator tests are skipped"
+          echo "::notice::No vendor URL: firmware build and emulator tests are skipped"
           echo "present=false" >> "$GITHUB_OUTPUT"
           exit 0
         fi

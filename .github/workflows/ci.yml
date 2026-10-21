@@ -18,7 +18,7 @@ jobs:
       - id: setup
         uses: ./.github/actions/setup
         with:
-          vendor-zip-url: ${{ vars.VENDOR_ZIP_URL }}
+          vendor-zip-url: ${{ vars.VENDOR_ZIP_URL || 'https://www.fnirsi.com.cn/uploads/file1/20261010/d68467f735b832bc57860df7f230ada41791625743186.zip' }}
 
       # Host C tests (ASan/UBSan), script tests, generated-asset check and, with the
       # vendor image present, the firmware patch tests and the Link status emulator.

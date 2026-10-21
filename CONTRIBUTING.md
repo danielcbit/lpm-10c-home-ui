@@ -50,7 +50,8 @@ Put the official FNIRSI LPM-10C V2.0.7 update where the build expects it. The
 command checks its SHA-256 first:
 
 ```sh
-python3 scripts/lpm_patch.py extract path/to/LPM-10C.zip
+curl -fLO https://www.fnirsi.com.cn/uploads/file1/20261010/d68467f735b832bc57860df7f230ada41791625743186.zip
+python3 scripts/lpm_patch.py extract d68467f735b832bc57860df7f230ada41791625743186.zip
 ```
 
 Without it, the firmware tests are skipped and only the host UI and script tests
@@ -110,9 +111,10 @@ Maintainers only:
 1. Rename `## Unreleased` in `CHANGELOG.md` to `## vX.Y.Z` and commit.
 2. `git tag vX.Y.Z && git push origin vX.Y.Z`.
 3. The Release workflow builds, runs the tests, writes the patch and publishes
-   it with the changelog section and build facts. It needs the repository
-   variable `VENDOR_ZIP_URL`: a URL of the official FNIRSI LPM-10C update
-   `.zip`. The workflow checks the SHA-256 of the TX image inside it.
+   it with the changelog section and build facts. It downloads the official
+   FNIRSI update from the URL in the workflows; if FNIRSI moves it, set the
+   repository variable `VENDOR_ZIP_URL` to the new location. The workflow
+   checks the SHA-256 of the TX image inside it.
 
 By contributing, you agree that your contributions are licensed under the GNU
 General Public License v3.0 or later (`LICENSE`), with the additional permission

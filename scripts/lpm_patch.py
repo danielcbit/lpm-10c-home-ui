@@ -7,8 +7,9 @@ SHA-256 of the vendor file it applies to and of the file it produces. Applying
 it to your own copy of the official update rebuilds the exact image that was
 released, or fails without writing anything.
 
-  # Apply: give the official update (the .zip from FNIRSI, or the .bin inside it)
-  python3 lpm_patch.py apply LPM-10C.zip lpm-10c-home-ui-v1.0.0.patch.json
+  # Apply: give the official update (the .zip as downloaded from FNIRSI, the
+  # LPM-10C.zip inside it, or the .bin)
+  python3 lpm_patch.py apply d68467f735b832bc57860df7f230ada41791625743186.zip lpm-10c-home-ui-v1.0.0.patch.json
   # -> LPM-10C_TX_V2.0.7_260907.bin in the current directory (the name the
   #    bootloader expects); copy it to the tester in BOOT mode, from Windows
 
@@ -22,6 +23,7 @@ Standard library only, so it runs anywhere Python 3.8+ does.
 """
 import argparse
 import hashlib
+import io
 import json
 from pathlib import Path
 import sys
@@ -38,15 +40,32 @@ def sha256(data):
     return hashlib.sha256(data).hexdigest()
 
 
+def find_in_zip(archive, depth=0):
+    """VENDOR_NAME from an open zip, looking one level into nested zips: FNIRSI's download
+    wraps LPM-10A.zip and LPM-10C.zip in a folder, and only the LPM-10C one has this name."""
+    names = [n for n in archive.namelist() if n.rsplit('/', 1)[-1] == VENDOR_NAME]
+    if names:
+        return archive.read(names[0])
+    if depth == 0:
+        for name in archive.namelist():
+            if name.lower().endswith('.zip'):
+                inner = io.BytesIO(archive.read(name))
+                if zipfile.is_zipfile(inner):
+                    found = find_in_zip(zipfile.ZipFile(inner), depth + 1)
+                    if found is not None:
+                        return found
+    return None
+
+
 def read_vendor(path):
     """The vendor TX image, from the .bin itself or the FNIRSI .zip that contains it."""
     path = Path(path)
     if zipfile.is_zipfile(path):
         with zipfile.ZipFile(path) as archive:
-            names = [n for n in archive.namelist() if n.rsplit('/', 1)[-1] == VENDOR_NAME]
-            if not names:
-                raise SystemExit(f'{path}: no {VENDOR_NAME} inside')
-            return archive.read(names[0])
+            found = find_in_zip(archive)
+        if found is None:
+            raise SystemExit(f'{path}: no {VENDOR_NAME} inside')
+        return found
     return path.read_bytes()
 
 
