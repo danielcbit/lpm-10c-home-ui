@@ -27,7 +27,9 @@
  * settings, this never touches them.
  *
  * The rows are a list taller than the screen: UP and DOWN scroll it a row at a
- * time, and while the checks run it follows the one running.
+ * time, and while the checks run it follows the one running. LEFT and RIGHT
+ * switch to the second tab, Switch port (switch_port.c), where M listens for
+ * what the switch announces about the port instead.
  *
  * Linked with home_ui.c by scripts/build_patched_image.py. The vendor calls
  * redirected here (all inside the vendor dispatchers, so tasks are unchanged):
@@ -35,9 +37,9 @@
  *   0x0800D8CC  key task, event 0x0B, QC count init 0x0800BD98    -> lpm_link_run
  *   0x0800FABE  GUI task, message 0x0C, QC draw 0x0800BB0C        -> lpm_link_draw
  *   0x0800FC20  GUI task, message 0x36, tool frame 0x0800EE8C     -> lpm_tool_frame
- *   0x0800D802  key task, events 2 and 3 (UP, DOWN), via lpm_home_key -> lpm_link_key
+ *   0x0800D802  key task, events 2 to 5 (UP, DOWN, LEFT, RIGHT), via lpm_home_key -> lpm_link_key
  * plus data patches: the key table entry for state 8 becomes M (key 4, short)
- * -> event 0x0B, the UP and DOWN entries of the home screen also match state 8,
+ * -> event 0x0B, the UP, DOWN, LEFT and RIGHT entries of the home screen also match state 8,
  * and the 1 s tick no longer starts a QC count in state 8.
  *
  * The checks block the key task, as the vendor Auto Config IP does; the
@@ -65,8 +67,10 @@
 #include <stdint.h>
 
 #include "draw.h"
+#include "fmt.h"
 #include "lpm_data.h"
 #include "lpm_theme.h"
+#include "switch_port.h"
 
 /* The vendor image ends its RAM at 0x20011298 (the initial stack top); nothing
  * above it is ever addressed, and SRAM dumps show its power-up pattern intact.
@@ -104,6 +108,8 @@
 #define DRAW_MESSAGE 0x0C
 #define KEY_UP 2 /* events of the home screen's UP and DOWN entries */
 #define KEY_DOWN 3
+#define KEY_LEFT 4
+#define KEY_RIGHT 5
 #define NSR 1
 #define NCR 0
 #define RCR 5
@@ -157,7 +163,6 @@
 #define ROW_DHCP6 9
 #define ROW_PING6 10
 #define ROW_INTERNET6 11
-#define STEP_NONE (LPM_STEP_SKIPPED + 1) /* not offered by this network, which is no fault */
 
 /* Layout: a check is its name and verdict, then its detail lines. */
 #define VIEW_Y 79 /* below the tab rule */
@@ -234,55 +239,6 @@ static const uint16_t verdict_colours[] = {LPM_C_DIM, LPM_C_DIM,   LPM_C_PASS, L
 
 /* ---- text --------------------------------------------------------------- */
 
-static char *put(char *p, const char *s)
-{
-    while (*s)
-        *p++ = *s++;
-    *p = 0;
-    return p;
-}
-
-static char *put_u(char *p, unsigned v)
-{
-    char digits[10];
-    int n = 0;
-    do
-        digits[n++] = (char)('0' + v % 10);
-    while (v /= 10);
-    while (n)
-        *p++ = digits[--n];
-    *p = 0;
-    return p;
-}
-
-static char *put_ip(char *p, const uint8_t *ip)
-{
-    for (int i = 0; i < 4; i++) {
-        if (i)
-            *p++ = '.';
-        p = put_u(p, ip[i]);
-    }
-    return p;
-}
-
-static char *put_hex(char *p, unsigned v, int digits, const char *hex)
-{
-    while (digits--)
-        *p++ = hex[v >> (4 * digits) & 15];
-    *p = 0;
-    return p;
-}
-
-static char *put_mac(char *p, const uint8_t *mac)
-{
-    for (int i = 0; i < 6; i++) {
-        if (i)
-            *p++ = ':';
-        p = put_hex(p, mac[i], 2, "0123456789ABCDEF");
-    }
-    return p;
-}
-
 /* RFC 5952: lower case, no leading zeros, the longest run of two or more zero
  * groups (the first of equals) as "::". */
 static char *put_ip6(char *p, const uint8_t *ip)
@@ -323,20 +279,6 @@ static char *put_ms(char *p, uint32_t us)
         p = put_u(p, (us + 500u) / 1000u);
     }
     return put(p, " ms");
-}
-
-static void copy(uint8_t *to, const uint8_t *from, int n)
-{
-    while (n--)
-        *to++ = *from++;
-}
-
-static int same(const uint8_t *a, const uint8_t *b, int n)
-{
-    while (n--)
-        if (*a++ != *b++)
-            return 0;
-    return 1;
 }
 
 static int known(const uint8_t *ip)
@@ -467,8 +409,26 @@ static void detail(const link_state *s, int row, char *p)
 
 /* ---- screen (GUI task) -------------------------------------------------- */
 
+/* The rows of the tab shown: the checklist or the switch port. */
+static int switch_tab(void)
+{
+    return SWITCH->tab != 0;
+}
+
+static int rows(void)
+{
+    return switch_tab() ? SWITCH_ROWS : ROWS;
+}
+
+static uint8_t *top_row(void)
+{
+    return switch_tab() ? &SWITCH->top : &LINK->top;
+}
+
 static int row_height(int row)
 {
+    if (switch_tab())
+        return DETAIL_DY + 2 + LINE_PITCH * lpm_switch_lines[row];
     return row == ROW_IPV6 ? HEADING_H : DETAIL_DY + 2 + LINE_PITCH * detail_lines[row];
 }
 
@@ -484,7 +444,7 @@ static int fits(int top, int row)
 static int last_top(void)
 {
     int top = 0;
-    while (!fits(top, ROWS - 1))
+    while (!fits(top, rows() - 1))
         top++;
     return top;
 }
@@ -512,28 +472,53 @@ static const char *next_line(const char *s, char *out)
 static void draw_row(const link_state *s, int row, int y)
 {
     char buffer[128], line[DETAIL_CHARS + 1];
-    if (row == ROW_IPV6) {
+    int sw = switch_tab();
+    if (!sw && row == ROW_IPV6) {
         text(&font_body, 10, y + 3, names[row], LPM_C_ACCENT, LPM_C_BG);
         fill(52, y + 6, DETAIL_W - 42, 1, LPM_C_RULE);
         return;
     }
-    unsigned step = s->step[row] <= STEP_NONE ? s->step[row] : LPM_STEP_PENDING;
-    text_field(&font_body, 10, y, 140, 0, names[row], LPM_C_FG, LPM_C_BG);
+    unsigned step = sw ? SWITCH->step[row] : s->step[row];
+    if (step > STEP_NONE)
+        step = LPM_STEP_PENDING;
+    text_field(&font_body, 10, y, 140, 0, sw ? lpm_switch_names[row] : names[row], LPM_C_FG, LPM_C_BG);
     text_field(&font_body, 150, y, 82, 1, verdicts[step], verdict_colours[step], LPM_C_BG);
-    detail(s, row, buffer);
+    if (sw)
+        lpm_switch_detail(row, buffer);
+    else
+        detail(s, row, buffer);
     const char *rest = buffer;
-    for (int i = 0; i < detail_lines[row]; i++) {
+    for (int i = 0; i < (sw ? lpm_switch_lines[row] : detail_lines[row]); i++) {
         rest = next_line(rest, line);
         text_field(&font_small, 10, y + DETAIL_DY + LINE_PITCH * i, DETAIL_W, 0, line, LPM_C_DIM, LPM_C_BG);
     }
 }
 
+/* The design's two tabs, the one shown underlined in the accent, over a rule. */
+static void draw_tabs(void)
+{
+    static const char *const tabs[2] = {"Checklist", "Switch port"};
+    for (int i = 0; i < 2; i++) {
+        int x = LPM_MARGIN + i * TAB_W, on = i == SWITCH->tab;
+        fill(x, LPM_CONTENT_Y, TAB_W, 19, LPM_C_BG);
+        text(&font_body, x + (TAB_W - text_width(&font_body, tabs[i])) / 2, LPM_CONTENT_Y + 4, tabs[i],
+             on ? LPM_C_FG : LPM_C_DIM, LPM_C_BG);
+        fill(x, LPM_CONTENT_Y + 19, TAB_W, 3, on ? LPM_C_ACCENT : LPM_C_BG);
+    }
+    fill(LPM_MARGIN, LPM_CONTENT_Y + 22, LPM_SCREEN_W - 2 * LPM_MARGIN, 1, LPM_C_RULE);
+    SWITCH->drawn_tab = SWITCH->tab;
+}
+
 /* Replaces the QC draw for message 0x0C: the rows that fit from the top one,
- * redrawn after every step and every scroll. */
+ * redrawn after every step, every scroll and every change of tab. */
 void lpm_link_draw(void)
 {
     link_state *s = LINK;
-    int top = s->top, end = last_top();
+    if (SWITCH->drawn_tab != SWITCH->tab) {
+        draw_tabs();
+        s->drawn_top = 0xFF; /* no row on screen belongs to this tab */
+    }
+    int top = *top_row(), end = last_top();
     if (top > end)
         top = end;
     /* Rows differ in height, so after a scroll the gaps between lines are cleared too. */
@@ -541,9 +526,9 @@ void lpm_link_draw(void)
         fill(0, VIEW_Y, BAR_X, LPM_FOOTER_Y - VIEW_Y, LPM_C_BG);
         s->drawn_top = (uint8_t)top;
     }
-    for (int row = top, y = ROW_Y0; row < ROWS && fits(top, row); y += row_height(row++))
+    for (int row = top, y = ROW_Y0; row < rows() && fits(top, row); y += row_height(row++))
         draw_row(s, row, y);
-    int track = LPM_FOOTER_Y - 4 - VIEW_Y, thumb = track * (ROWS - end) / ROWS;
+    int track = LPM_FOOTER_Y - 4 - VIEW_Y, thumb = track * (rows() - end) / rows();
     fill(BAR_X, VIEW_Y, 3, track, LPM_C_RULE);
     fill(BAR_X, VIEW_Y + (track - thumb) * top / end, 3, thumb, LPM_C_DIM);
 }
@@ -560,13 +545,9 @@ void lpm_tool_frame(void)
     }
     fill(0, LPM_CONTENT_Y, LPM_SCREEN_W, LPM_FOOTER_Y - LPM_CONTENT_Y, LPM_C_BG);
     draw_header("Link status", STATUS_X);
-    /* The design's Checklist tab, alone: there is no DHCP tab yet. */
-    text(&font_body, LPM_MARGIN + (TAB_W - text_width(&font_body, "Checklist")) / 2, LPM_CONTENT_Y + 4, "Checklist",
-         LPM_C_FG, LPM_C_BG);
-    fill(LPM_MARGIN, LPM_CONTENT_Y + 19, TAB_W, 3, LPM_C_ACCENT);
-    fill(LPM_MARGIN, LPM_CONTENT_Y + 22, LPM_SCREEN_W - 2 * LPM_MARGIN, 1, LPM_C_RULE);
-    draw_footer("M run  UP/DOWN scroll", "BACK home");
-    LINK->drawn_top = LINK->top; /* the whole view was just cleared */
+    draw_tabs();
+    draw_footer("M run  UP/DN scroll  <> tab", "BACK");
+    LINK->drawn_top = *top_row(); /* the whole view was just cleared */
     lpm_link_draw();
     /* The vendor's own arrow, as its tools draw it on message 0x37, but only this one:
      * its state-8 case (0x0801B21C, for the QC test) would mark another port and paint
@@ -582,14 +563,16 @@ static void show(void)
     post_message(DRAW_MESSAGE, 0, 0);
 }
 
-/* UP or DOWN in Link status (events 2 and 3, through lpm_home_key). */
+/* UP, DOWN, LEFT or RIGHT in Link status (events 2 to 5, through lpm_home_key). */
 void lpm_link_key(int action)
 {
-    link_state *s = LINK;
-    if (action == KEY_UP && s->top > 0)
-        s->top--;
-    else if (action == KEY_DOWN && s->top < last_top())
-        s->top++;
+    uint8_t *top = top_row();
+    if (action == KEY_UP && *top > 0)
+        (*top)--;
+    else if (action == KEY_DOWN && *top < last_top())
+        (*top)++;
+    else if (action == KEY_LEFT || action == KEY_RIGHT)
+        SWITCH->tab = action == KEY_RIGHT;
     show();
 }
 
@@ -607,17 +590,6 @@ static void finish(link_state *s, int row, int step)
 {
     s->step[row] = (uint8_t)step;
     show();
-}
-
-static void put16(uint8_t *p, unsigned v)
-{
-    p[0] = (uint8_t)(v >> 8);
-    p[1] = (uint8_t)v;
-}
-
-static unsigned get16(const uint8_t *p)
-{
-    return (unsigned)(p[0] << 8 | p[1]);
 }
 
 /* The Internet checksum (RFC 1071): sum16 adds n bytes, an odd last one padded with zero. */
@@ -1248,10 +1220,14 @@ static void clear(link_state *s)
         b[i] = 0;
 }
 
-/* M in Link status (event 0x0B). */
+/* M in Link status (event 0x0B): the checks, or on the second tab the switch port. */
 void lpm_link_run(void)
 {
     link_state *s = LINK;
+    if (switch_tab()) {
+        lpm_switch_run();
+        return;
+    }
     uint8_t drawn = s->drawn_top; /* still on screen */
     clear(s);
     s->drawn_top = drawn;
@@ -1264,7 +1240,7 @@ void lpm_link_run(void)
             check_dns(s);
         }
         check_ipv6(s);
-        while (!fits(s->top, ROWS - 1)) /* the end of the list, whichever checks ran */
+        while (!fits(s->top, rows() - 1)) /* the end of the list, whichever checks ran */
             s->top++;
     }
     NET_BUSY = 0;
@@ -1278,6 +1254,7 @@ void lpm_link_run(void)
 void lpm_link_open(void)
 {
     clear(LINK); /* before set_sysState, whose frame message draws the state */
+    lpm_switch_reset();
     set_sys_state(LINK_SYS_STATE);
     lpm_link_run();
 }

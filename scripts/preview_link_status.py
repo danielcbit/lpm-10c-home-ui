@@ -37,6 +37,13 @@ device IP settings (0x20000306) and the Cust_Info record (0x20002CF0) untouched,
 and clears the network busy flag, and that UP and DOWN (key events 2 and 3,
 through lpm_home_key) scroll the list without touching the menu selection.
 
+The Switch port tab (switch_port.c) has scenarios of its own: RIGHT selects it,
+M listens, and the model plays a switch that announces itself by LLDP (after
+our LLDP-MED fast start) or by CDP, tags frames with 802.1Q, answers the
+EAPOL-Start with an EAP Request/Identity, or stays silent for the full 32 s.
+Each frame we send (LLDP, EAPOL-Start) is checked, and the rows and their
+details compared with what the switch announced.
+
   .venv/bin/python scripts/preview_link_status.py     # -> output/link-status/
 
 Needs unicorn in .venv, and clang and lld to find the added code's symbols
@@ -69,7 +76,7 @@ DNS_RTT_US = {GATEWAY: 3000, LOCAL_DNS: 3000, CLOUDFLARE: 15000}
 QUESTION = b'\x07example\x03com\x00\x00\x01\x00\x01'
 EXAMPLE_COM = bytes([93, 184, 215, 14])
 VENDOR_RCR, RCR_ALL = 0x31, 0x08
-GREEN, VENDOR_PANEL = 0x07E0, 0x31A7  # the vendor arrow, on and off
+GREEN, VENDOR_PANEL = 0x5E4F, 0x2167  # the vendor arrow, on and off, through the theme: LPM_C_PASS, LPM_C_FIELD
 BACKGROUND = 0x10C4  # LPM_C_BG
 # IPv6: the router is also the DHCPv6 server; another host may claim our SLAAC address.
 ROUTER_LL = bytes.fromhex('fe80000000000000021a2bfffe3c0001')
@@ -196,7 +203,8 @@ class Network:
                  echo=True, arp_first=False, internet=(CLOUDFLARE, GOOGLE), dhcp_dns=GATEWAY,
                  dns_answers=(GATEWAY, LOCAL_DNS, CLOUDFLARE), dns_rcode=None, cname=False,
                  ra=True, lifetime=1800, managed=False, autonomous=True, dhcp6=None, echo6=True,
-                 internet6=(CLOUDFLARE6, GOOGLE6), slaac_in_use=False):
+                 internet6=(CLOUDFLARE6, GOOGLE6), slaac_in_use=False, lldp=None, cdp=None, cdp_at_ms=None,
+                 dot1x=False, tagged=()):
         self.t, self.uc = tester, tester.uc
         self.link, self.ten, self.full, self.offer, self.ack = link, ten, full, offer, ack
         self.gateway, self.arp, self.echo, self.arp_first = gateway, arp, echo, arp_first
@@ -219,6 +227,11 @@ class Network:
         self.resolved = set()  # our IPv6 addresses the router has a MAC for (by our neighbour advertisement)
         self.held = []  # echo replies waiting for that
         self.multicast_dropped = 0
+        # Switch port: the frames the switch sends, and those we sent it.
+        self.lldp, self.cdp, self.dot1x, self.tagged = lldp, cdp, dot1x, tagged
+        self.lldp_sent, self.eapol_starts = [], []
+        if cdp is not None:
+            self.queue.append((cdp_at_ms * 1000, cdp))
         self.stubs = {0x08016A70: self.dm9051_read, 0x08016AE0: self.dm9051_write, 0x08022088: self.wait_link,
                       0x08022810: self.receive, 0x080228B8: self.transmit, 0x0801FE38: self.dhcp_send,
                       0x0801FFD4: self.dhcp_wait, 0x0802144C: self.arp_request, 0x08021FEC: self.arp_wait,
@@ -338,6 +351,8 @@ class Network:
         self.us += 30
         length = struct.unpack('<H', self.uc.mem_read(FRAME_LEN, 2))[0]
         f = bytes(self.uc.mem_read(FRAME, length))
+        if f[12:14] in (b'\x88\xcc', b'\x88\x8e'):
+            return self.transmit_switch(f, length)
         if f[12:14] == b'\x86\xdd':
             return self.transmit6(f, length)
         if f[12:14] == b'\x08\x06':
@@ -375,6 +390,33 @@ class Network:
             reply_ip = sealed(ip[:12] + target + OUR_IP, 10)
             reply_icmp = sealed(b'\x00' + icmp[1:], 2)
             self.queue.append((self.us + delay_us, self.own_mac() + GATEWAY_MAC + b'\x08\x00' + reply_ip + reply_icmp))
+        return 0
+
+    def transmit_switch(self, f, length):
+        """Our LLDP-MED announcement and EAPOL-Start. A switch with LLDP-MED answers the first at once (fast
+        start), and its tagged frames follow; an 802.1X port answers the second with an EAP Request/Identity."""
+        if length < 60 or f[6:12] != self.own_mac():
+            self.errors.append(f'switch frame of {length} bytes from {f[6:12].hex()}')
+        if f[12:14] == b'\x88\xcc':
+            tlvs = parse_lldp(f[14:length])
+            ok = f[:6] == LLDP_GROUP and [t for t, _ in tlvs[:3]] == [1, 2, 3] and tlvs[-1] == (0, b'') \
+                and tlvs[0][1] == b'\x04' + self.own_mac() and tlvs[1][1] == b'\x03' + self.own_mac() \
+                and (127, bytes.fromhex('0012bb01000101')) in tlvs
+            if not ok:
+                self.errors.append(f'bad LLDP frame {f[:length].hex()}')
+            self.lldp_sent.append(self.us)
+            if self.lldp is not None and len(self.lldp_sent) == 1:
+                self.queue.append((self.us + 500_000, self.lldp))
+                for i, vlan in enumerate(self.tagged):
+                    self.queue.append((self.us + 100_000 * (i + 1), tagged_frame(vlan)))
+            return 0
+        if f[:6] != PAE_GROUP or f[14:18] != b'\x01\x01\x00\x00':
+            self.errors.append(f'bad EAPOL-Start {f[:18].hex()}')
+        self.eapol_starts.append(self.us)
+        if self.dot1x:
+            eap = bytes([1, 1, 0, 5, 1])  # code Request, id 1, length 5, type Identity
+            request = PAE_GROUP + SWITCH_MAC + b'\x88\x8e' + bytes([2, 0]) + struct.pack('>H', 5) + eap
+            self.queue.append((self.us + 20_000, request + bytes(60 - len(request))))
         return 0
 
     def dns_query(self, f, length):
@@ -574,6 +616,157 @@ class LinkTester(P.Tester):
         super()._hook(uc, address, size, _)
 
 
+# ---- Switch port ------------------------------------------------------------------------------------------
+
+SWITCH = 0x20020100  # switch_state in switch_port.h (its _Static_assert pins the layout)
+SWITCH_STATE = struct.Struct('<7s10B4sxHHH6H32s32s32s32s')
+SWITCH_MAC = bytes.fromhex('00a0c9112233')
+LLDP_GROUP, PAE_GROUP = bytes.fromhex('0180c200000e'), bytes.fromhex('0180c2000003')
+CDP_GROUP = bytes.fromhex('01000ccccccc')
+KEY_LEFT, KEY_RIGHT = 4, 5
+SWITCH_ROWS = ['Physical link', 'Switch', 'Port', 'VLAN', 'Management', 'PoE', '802.1X']
+
+
+def tlv(kind, value):
+    return struct.pack('>H', kind << 9 | len(value)) + value
+
+
+def parse_lldp(data):
+    out, at = [], 0
+    while at + 2 <= len(data):
+        head = struct.unpack('>H', data[at:at + 2])[0]
+        kind, n = head >> 9, head & 0x1FF
+        out.append((kind, data[at + 2:at + 2 + n]))
+        at += 2 + n
+        if kind == 0:
+            break
+    return out
+
+
+def lldp_frame():
+    """An access switch port as a Cisco or Aruba LLDP-MED switch announces it: port VLAN 20, voice VLAN 120,
+    PoE class 4 with 25.5 W allocated, a management address, and a system description longer than one line."""
+    voice = 1 << 22 | 120 << 9 | 5 << 6 | 46  # tagged, VLAN 120, priority 5, DSCP EF
+    body = (tlv(1, b'\x04' + SWITCH_MAC) + tlv(2, b'\x05Gi1/0/12') + tlv(3, b'\x00\x78')
+            + tlv(4, b'Office 2.14 desk B') + tlv(5, b'core-sw1.example.net')
+            + tlv(6, b'Cisco IOS Software, C9300 Software (CAT9K_IOSXE), Version 17.9.4')
+            + tlv(8, bytes([5, 1, 10, 0, 0, 2, 2, 0, 0, 0, 1, 0]))
+            + tlv(127, bytes.fromhex('0080c201') + struct.pack('>H', 20))
+            + tlv(127, bytes.fromhex('00120f02') + bytes([0x0F, 1, 5, 0x51]) + struct.pack('>HH', 255, 255))
+            + tlv(127, bytes.fromhex('0012bb0201') + voice.to_bytes(3, 'big'))
+            + tlv(0, b''))
+    return LLDP_GROUP + SWITCH_MAC + b'\x88\xcc' + body
+
+
+def cdp_frame():
+    """A CDP v2 announcement: device ID, address, port, platform, native VLAN 30, voice VLAN 130."""
+    def t(kind, value):
+        return struct.pack('>HH', kind, 4 + len(value)) + value
+    body = (bytes([2, 180, 0, 0]) + t(1, b'edge-sw7') + t(2, struct.pack('>I', 1) + bytes([1, 1, 0xCC]) +
+            struct.pack('>H', 4) + bytes([172, 16, 0, 7])) + t(3, b'FastEthernet0/7') + t(6, b'cisco WS-C2960-24TT-L')
+            + t(0x0A, struct.pack('>H', 30)) + t(0x0E, b'\x01' + struct.pack('>H', 130)))
+    llc = bytes.fromhex('aaaa0300000c2000') + body
+    return CDP_GROUP + SWITCH_MAC + struct.pack('>H', len(llc)) + llc
+
+
+def tagged_frame(vlan):
+    """A broadcast ARP request, tagged with vlan, as a trunk port would pass it."""
+    arp = bytes.fromhex('0001080006040001') + OTHER_MAC + bytes([10, 9, 0, 1]) + bytes(6) + bytes([10, 9, 0, 2])
+    return b'\xff' * 6 + OTHER_MAC + b'\x81\x00' + struct.pack('>H', vlan) + b'\x08\x06' + arp + bytes(14)
+
+
+SWITCH_SCENARIOS = {  # name -> (network model settings, expected steps, expected detail fragments)
+    'switch-lldp-med': (dict(lldp=lldp_frame(), tagged=(120, 20, 120)),
+                        ['PASS', 'PASS', 'PASS', 'PASS', 'PASS', 'PASS', 'NONE'],
+                        ['core-sw1.example.net (LLDP)', 'Cisco IOS Software, C9300 Soft', 'Gi1/0/12',
+                         'Office 2.14 desk B', 'Port VLAN 20, voice 120', 'Tagged: VLAN 120, 20', '10.0.0.2',
+                         'Class 4, 25.5 W', 'Not required (no EAP request)']),
+    'switch-cdp-dot1x': (dict(cdp=cdp_frame(), cdp_at_ms=9000, dot1x=True),
+                         ['PASS', 'PASS', 'PASS', 'PASS', 'PASS', 'NONE', 'WARN'],
+                         ['edge-sw7 (CDP)', 'cisco WS-C2960-24TT-L', 'FastEthernet0/7', 'Port VLAN 30, voice 130',
+                          '172.16.0.7', 'Required: the switch asked who we are']),
+    'switch-silent': (dict(),
+                      ['PASS', 'NONE', 'NONE', 'NONE', 'NONE', 'NONE', 'NONE'],
+                      ['No LLDP or CDP in 32 s', 'The switch may not send them', 'Not announced, no tagged frames']),
+    'switch-no-link': (dict(link=False),
+                       ['FAIL', 'SKIPPED', 'SKIPPED', 'SKIPPED', 'SKIPPED', 'SKIPPED', 'SKIPPED'],
+                       ['No link detected']),
+}
+
+
+def read_switch(uc):
+    f = SWITCH_STATE.unpack(bytes(uc.mem_read(SWITCH, SWITCH_STATE.size)))
+    text = [t[:t.index(0)].decode() if 0 in t else t.decode() for t in f[21:25]]
+    return {'steps': [STEPS[s] if s < len(STEPS) else f'?{s}' for s in f[0]], 'tab': f[1], 'drawn_tab': f[2],
+            'top': f[3], 'heard': f[4], 'dot1x': f[5], 'address': f[11], 'vlan': f[12], 'voice_vlan': f[13],
+            'poe_dw': f[14], 'tagged': list(f[15:15 + f[10]]), 'name': text[0], 'platform': text[1],
+            'port': text[2], 'port_desc': text[3]}
+
+
+def run_switch_scenario(image, sram, symbols, entries, settings, expected, fragments, out, name):
+    """Open Link status with the cable unplugged, plug it in, RIGHT to the Switch port tab, M, then draw the
+    result, its end and the checklist again after LEFT. Returns the problems."""
+    open_, frame, draw, run = entries
+    key = symbols['lpm_home_key'] & ~1
+    tester = LinkTester(image, sram, symbols['text'] & ~1)
+    tester.uc.mem_write(SWITCH, b'\xa5' * SWITCH_STATE.size)  # whatever the RAM held: the open must clear it
+    tester.net = Network(tester, link=False)
+    tester.call(open_)
+    tester.net = net = Network(tester, **settings)
+    problems = []
+    if read_switch(tester.uc)['tab'] != 0:
+        problems.append('Link status did not open on the checklist')
+    tester.call(frame)
+    tester.messages.clear()
+    tester.call(key, KEY_RIGHT)
+    if read_switch(tester.uc)['tab'] != 1 or tester.messages != [0x0C]:
+        problems.append(f'RIGHT: tab {read_switch(tester.uc)["tab"]}, messages {tester.messages}')
+    tester.call(draw)
+    tester.drawn.clear()
+    tester.call(run)
+    state = read_switch(tester.uc)
+    tester.call(frame)
+    tester.call(draw)
+    P.png(out / f'{name}.png', tester.fb, P.W, P.H)
+    tester.uc.mem_write(SWITCH + 9, b'\xff')  # scrolled past the end: the draw stops at the last row
+    tester.call(draw)
+    P.png(out / f'{name}-end.png', tester.fb, P.W, P.H)
+    drawn = ' | '.join(tester.drawn)
+    problems += list(net.errors)
+    if state['steps'] != expected:
+        problems.append(f'steps {state["steps"]}, expected {expected}')
+    problems += [f'"{text}" not drawn' for text in fragments if text not in drawn]
+    if 'Switch port' not in drawn or 'Checklist' not in drawn:
+        problems.append('tabs not drawn')
+    if tester.uc.mem_read(NET_BUSY, 1)[0] != 0:
+        problems.append('network busy flag left set')
+    seconds = net.us / 1e6
+    if not settings.get('link', True):
+        if net.lldp_sent or net.eapol_starts or net.rcr_writes:
+            problems.append('frames sent without a link')
+    else:
+        if net.rcr_writes[:1] != [VENDOR_RCR | RCR_ALL] or net.rcr != VENDOR_RCR:
+            problems.append(f'receive control writes {[hex(v) for v in net.rcr_writes]}')
+        if len(net.lldp_sent) != 1:
+            problems.append(f'{len(net.lldp_sent)} LLDP frames sent, expected one')
+        # The listening ends 3 s after the first announcement, else at 32 s; EAPOL-Start goes every 5 s until
+        # an EAP request answers it.
+        heard_at = 0.5 if net.lldp is not None else (settings.get('cdp_at_ms') or 0) / 1000
+        limit = heard_at + 3 if heard_at else 32
+        if not limit <= seconds <= limit + 0.1:
+            problems.append(f'listened {seconds:.2f} s, expected {limit} s')
+        starts = 1 if net.dot1x else 1 + int((limit - 1e-3) // 5)
+        if len(net.eapol_starts) != starts:
+            problems.append(f'{len(net.eapol_starts)} EAPOL-Starts, expected {starts}')
+    tester.messages.clear()
+    tester.drawn.clear()
+    tester.call(key, KEY_LEFT)
+    tester.call(draw)
+    if read_switch(tester.uc)['tab'] != 0 or 'Physical link' not in ' | '.join(tester.drawn):
+        problems.append('LEFT did not return to the checklist')
+    return problems, seconds
+
+
 def read_state(uc):
     fields = STATE.unpack(bytes(uc.mem_read(LINK, STATE.size)))
     rtt, internet_rtt, dns_rtt, rtt6, internet6_rtt, lifetime, steps = fields[:7]
@@ -590,9 +783,10 @@ def linked_symbols():
     import build_patched_image as b
     patch_dir, ui = ROOT / 'src' / 'firmware_patch', ROOT / 'src' / 'lpm_ui'
     sources = [patch_dir / n for n in ('home_ui.c', 'link_status.c', 'draw.c', 'cust_info.c', 'vendor_text.c',
-                                       'subset_font.c')] + [ui / 'lpm_assets.c']
+                                       'subset_font.c', 'theme.c', 'switch_port.c')] + [ui / 'lpm_assets.c']
     keep = ('lpm_home_draw', 'lpm_home_key', 'lpm_cust_info_store_if_changed', 'lpm_cust_info_load_english',
-            'lpm_cust_info_defaults_english', 'lpm_reset_warning_title', *b.LINK_STATUS_CALLS)
+            'lpm_cust_info_defaults_english', 'lpm_reset_warning_title', *b.LINK_STATUS_CALLS, *b.THEME_ROUTINES,
+            'lpm_tool_title')
     return b.link_added_code(sources, patch_dir / 'home_ui.ld', includes=[ui, patch_dir], keep=keep)[1]
 
 
@@ -778,8 +972,18 @@ def main():
             print('    ' + drawn)
         if problems:
             failures.append(name)
+    for name, (settings, expected, fragments) in SWITCH_SCENARIOS.items():
+        if args.only and name not in args.only:
+            continue
+        problems, seconds = run_switch_scenario(image, sram, symbols, (open_, frame, draw, run), settings, expected,
+                                                fragments, args.out, name)
+        status = 'ok' if not problems else 'FAIL: ' + '; '.join(problems)
+        print(f'{name:22} {" ".join(f"{s[:4]:4}" for s in expected)}  {seconds:4.1f} s  {status}')
+        if problems:
+            failures.append(name)
     print(f'Deepest stack use: {deepest} bytes')
-    print(f'Wrote {2 * (len(args.only) if args.only else len(SCENARIOS))} screens to {args.out}/')
+    total = len(args.only) if args.only else len(SCENARIOS) + len(SWITCH_SCENARIOS)
+    print(f'Wrote {2 * total} screens to {args.out}/')
     return 1 if failures else 0
 
 

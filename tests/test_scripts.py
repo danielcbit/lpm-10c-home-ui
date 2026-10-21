@@ -340,8 +340,9 @@ class PatchedImageTests(unittest.TestCase):
         entry = 0x08026264 - b.BASE + 19 * 8
         self.assertEqual(struct.unpack_from('<IBBB', self.vendor, entry), (0x100, 1, 8, 0x0B))
         self.assertEqual(struct.unpack_from('<IBBB', patched, entry), (0x100, 4, 3, 0x0B))
-        # Entries 2 and 3, UP and DOWN short presses -> events 2 and 3 (lpm_home_key): home, and now state 8.
-        for index, key, event in ((2, 3, 2), (3, 2, 3)):
+        # Entries 2 to 5, UP, DOWN, LEFT and RIGHT short presses -> events 2 to 5 (lpm_home_key): home, and now
+        # state 8, to scroll and to change tab. The held (repeating) LEFT and RIGHT entries stay home only.
+        for index, key, event in ((2, 3, 2), (3, 2, 3), (4, 5, 4), (5, 1, 5)):
             entry = 0x08026264 - b.BASE + index * 8
             self.assertEqual(struct.unpack_from('<IBBB', self.vendor, entry), (0x004, key, 3, event))
             self.assertEqual(struct.unpack_from('<IBBB', patched, entry), (0x104, key, 3, event))
@@ -355,6 +356,58 @@ class PatchedImageTests(unittest.TestCase):
         home = (ROOT / 'src' / 'firmware_patch' / 'home_ui.c').read_text()
         self.assertIn('{"Link status", &lpm_icon_ethernet, 4}', home)
         self.assertNotIn('QC test', home)
+
+    def test_vendor_drawing_routines_branch_to_the_theme(self):
+        try:
+            build_patched_image.find_tool('ld.lld')
+        except SystemExit:
+            self.skipTest('clang or lld not installed')
+        b = build_patched_image
+        patched = b.apply_patches(self.vendor, b.patch_list('home-ui'))
+        for name, entry in b.THEME_ROUTINES.items():
+            at = entry - b.BASE
+            h1, h2 = struct.unpack_from('<HH', patched, at)
+            self.assertEqual((h1 & 0xF800, h2 & 0xD000), (0xF000, 0x9000), f'{name}: no b.w at {entry:#x}')
+            self.assertNotEqual(patched[at:at + 4], self.vendor[at:at + 4], name)
+        # The tool title draws the home list names: draw_string at 0x0800F3F8 is redirected.
+        site = b.TOOL_TITLE_CALL
+        self.assertEqual(self.vendor[site:site + 4], b.thumb_branch(site, 0x8018D48 - b.BASE, link=True))
+        self.assertNotEqual(patched[site:site + 4], self.vendor[site:site + 4])
+
+    def test_theme_map_keys_are_not_theme_colours(self):
+        """lpm_theme_colour passes the theme's own colours first, so a vendor colour equal to one would never be
+        mapped, and every map target must be a theme colour so a second mapping leaves it alone."""
+        theme = (ROOT / 'src' / 'lpm_ui' / 'lpm_theme.h').read_text()
+        palette = {}
+        for name, r, g, b in re.findall(r'#define (LPM_C_\w+) LPM_RGB565\((0x\w+), (0x\w+), (0x\w+)\)', theme):
+            r, g, b = int(r, 16), int(g, 16), int(b, 16)
+            palette[name] = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
+        source = (ROOT / 'src' / 'firmware_patch' / 'theme.c').read_text()
+        pairs = re.findall(r'\{(0x[0-9A-F]{4}), (LPM_C_\w+)\}', source)
+        self.assertEqual(len(pairs), 17)
+        listed = re.search(r'palette\[\] = \{([^}]*)\}', source).group(1)
+        for key, target in pairs:
+            self.assertNotIn(int(key, 16), palette.values(), key)
+            self.assertIn(target, palette)
+            self.assertIn(target, listed, f'{target} is a map target but not in the pass-through palette')
+
+    def test_vendor_screens_open_themed_in_the_emulator(self):
+        try:
+            import unicorn  # noqa: F401
+            build_patched_image.find_tool('ld.lld')
+        except (ImportError, SystemExit):
+            self.skipTest('unicorn, clang or lld not installed (run with .venv/bin/python)')
+        import preview_vendor as V
+        b = build_patched_image
+        image = b.apply_patches(self.vendor, b.patch_list('home-ui'))
+        sram = (ROOT / 'tests' / 'fixtures' / 'sram-sanitized.bin').read_bytes()
+        ping = V.TOOLS.index('ping')
+        tester = V.VendorTester(image, sram)
+        tester.uc.mem_write(V.MENU_STATE, bytes([2, 4 + ping]))
+        self.assertIsNone(tester.run(V.open_targets(image)[ping], 4 + ping))
+        self.assertEqual(tester.drain(), [])
+        # The vendor greys are gone: the frame body, inner boxes, label boxes and black background are themed.
+        self.assertFalse(set(tester.fb) & {0x2105, 0x31A7, 0x4A69, 0x0000})
 
     def test_chinese_pictures_are_removed(self):
         try:

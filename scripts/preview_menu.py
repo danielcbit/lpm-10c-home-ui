@@ -76,7 +76,7 @@ class Tester:
         self.col, self.row = [0, W - 1], [0, H - 1]
         self.x = self.y = 0
         self.lowest_sp = SRAM_BASE + SRAM_BYTES - 0x100
-        self.uc.hook_add(UC_HOOK_CODE, self._hook)
+        self.code_hook = self.uc.hook_add(UC_HOOK_CODE, self._hook)
         self.uc.hook_add(UC_HOOK_MEM_WRITE, self._lcd_cmd, begin=LCD_CMD, end=LCD_CMD + 1)
         self.uc.hook_add(UC_HOOK_MEM_WRITE, self._lcd_data, begin=LCD_DATA, end=LCD_DATA + 1)
 

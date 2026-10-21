@@ -251,9 +251,24 @@ LINK_STATUS_DATA = [
     # lpm_home_key): also in state 8, where lpm_home_key passes them to lpm_link_key to scroll.
     (0x1D274, b'\x04\x00\x00\x00', b'\x04\x01\x00\x00', 'key table entry 2 (UP, event 2): states 2 -> 2 and 8'),
     (0x1D27C, b'\x04\x00\x00\x00', b'\x04\x01\x00\x00', 'key table entry 3 (DOWN, event 3): states 2 -> 2 and 8'),
+    # LEFT and RIGHT, short presses only, change the Link status tab (Checklist, Switch port).
+    (0x1D284, b'\x04\x00\x00\x00', b'\x04\x01\x00\x00', 'key table entry 4 (LEFT, event 4): states 2 -> 2 and 8'),
+    (0x1D28C, b'\x04\x00\x00\x00', b'\x04\x01\x00\x00', 'key table entry 5 (RIGHT, event 5): states 2 -> 2 and 8'),
     # The 1 s tick 0x080232C8 sends the QC count task a measure command while in state 8.
     (0x1A30C, b'\x04\xd1', b'\x04\xe0', 'tick 0x0802330C: bne -> b, no QC count command in state 8'),
 ]
+
+# The theme (theme.c): the entries of the vendor drawing routines branch to replacements that map
+# vendor colours to the theme and draw Terminus. Flash address of the vendor routine -> function.
+THEME_ROUTINES = {
+    'lpm_theme_clear': 0x080182A4,      # clear(colour)
+    'lpm_theme_point': 0x08018450,      # draw_point(x, y), colour at 0x200001A0; pictures draw through it
+    'lpm_theme_fill_rect': 0x08018568,  # fill_rect(x0, y0, x1, y1, colour)
+    'lpm_theme_plot': 0x080188A4,       # plot(x, y, colour), 40 rows lower
+    'lpm_theme_char': 0x08018A34,       # draw_char(x, y, c, size, mode)
+}
+
+TOOL_TITLE_CALL = 0x63F8  # 0x0800F3F8: draw_string(13, 21, 88, 20, 16, menu label) in the tool title
 
 # Chinese pictures in vendor screens: the reset warning title (picture 0x15, through 0x0800F412)
 # and the About company name (picture 0x16, 0x0800F422; the second call is the Chinese branch).
@@ -266,10 +281,10 @@ def home_ui():
     ui = ROOT / 'src' / 'lpm_ui'
     patch_dir = ROOT / 'src' / 'firmware_patch'
     sources = [patch_dir / name for name in ('home_ui.c', 'link_status.c', 'draw.c', 'cust_info.c', 'vendor_text.c',
-                                              'subset_font.c')]
+                                              'subset_font.c', 'theme.c', 'switch_port.c')]
     sources.append(ui / 'lpm_assets.c')
     keep = ('lpm_home_draw', 'lpm_home_key', 'lpm_cust_info_store_if_changed', 'lpm_cust_info_load_english',
-            'lpm_cust_info_defaults_english', 'lpm_reset_warning_title', *LINK_STATUS_CALLS)
+            'lpm_cust_info_defaults_english', 'lpm_reset_warning_title', *LINK_STATUS_CALLS, *THEME_ROUTINES, 'lpm_tool_title')
     sections, symbols = link_added_code(sources, patch_dir / 'home_ui.ld', includes=[ui, patch_dir], keep=keep)
     if symbols['lpm_home_draw'] != PAYLOAD_END + BASE:
         raise ValueError('home_ui.ld must place lpm_home_draw at the old payload end 0x0807244C')
@@ -310,6 +325,12 @@ def home_ui():
     patches += [redirect_call(site, old, link[name], f'{site + BASE:#010x}: {old:#010x} -> {name}')
                 for name, (site, old) in LINK_STATUS_CALLS.items()]
     patches += LINK_STATUS_DATA
+    patches.append(redirect_call(TOOL_TITLE_CALL, 0x8018D48, (symbols['lpm_tool_title'] & ~1) - BASE,
+                                 'tool frame title 0x0800F3F8: draw_string -> lpm_tool_title (home list names)'))
+    vendor = VENDOR.read_bytes()
+    patches += [(entry - BASE, vendor[entry - BASE:entry - BASE + 4],
+                 thumb_branch(entry - BASE, (symbols[name] & ~1) - BASE, link=False),
+                 f'theme: {entry:#010x} -> b.w {name}') for name, entry in THEME_ROUTINES.items()]
     # The two Chinese pictures left in English screens (vendor_text.c).
     title = (symbols['lpm_reset_warning_title'] & ~1) - BASE
     patches.append(redirect_call(RESET_WARNING_PICTURE, 0x800F412, title,

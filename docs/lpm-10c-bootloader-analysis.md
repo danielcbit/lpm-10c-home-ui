@@ -500,6 +500,7 @@ A new test, described by the owner: it checks the physical link, gets an address
 | key table entry 19 (`0x08026300`) | key 1, held | key 4 (M), short press |
 | `0x0802330C` | `bne` | `b`: no QC count command from the tick |
 | key table entries 2 and 3 (`0x08026274`, `0x0802627C`) | UP, DOWN in state 2 (mask `0x004`) | also state 8 (mask `0x104`): events 2 and 3 reach `lpm_home_key`, which passes them to `lpm_link_key` in state 8 |
+| key table entries 4 and 5 (`0x08026284`, `0x0802628C`) | LEFT, RIGHT short presses in state 2 | also state 8: events 4 and 5 change the tab (added 2026-10-21) |
 
 So `M` on the home item opens the screen and runs it once, `M` runs it again, `UP` and `DOWN` scroll, and `BACK` returns home (the vendor's own event 7). The home screen's UP and DOWN entries were the only ones to widen: they come before any state-8 entry, and no other entry gives state 8 those keys (a test checks this). The QC long-press "init count" is no longer reachable, which also protects the count calibration from an accidental overwrite.
 
@@ -553,8 +554,75 @@ Scrolling: each scenario presses `DOWN` twelve times and `UP` twelve times throu
 
 The deepest stack use is 400 bytes.
 
+### Switch port tab (added 2026-10-21; emulator only, not yet on the tester)
+
+`RIGHT` in Link status shows a second tab, **Switch port** (`src/firmware_patch/switch_port.c`); `LEFT` returns to the checklist. `M` on it listens on the DM9051 port for what the switch says about the port the tester is plugged into:
+
+| Row | Source |
+| --- | --- |
+| Physical link | DM9051 registers, as the checklist |
+| Switch | LLDP system name (else chassis ID) and description, or CDP device ID and platform |
+| Port | LLDP port ID and description, or CDP port ID |
+| VLAN | LLDP 802.1 port VLAN ID and LLDP-MED voice VLAN (network policy, application 1), or CDP native and voice VLAN; plus every 802.1Q tag seen on received frames |
+| Management | LLDP management address (IPv4), or the first CDP address |
+| PoE | 802.3 power via MDI (class, and the allocated power of the 802.3at extension), LLDP-MED extended power, or CDP power available |
+| 802.1X | An EAPOL-Start to `01:80:C2:00:00:03`, repeated every 5 s; an EAP Request/Identity in answer is WARN ("Required"), none is NONE |
+
+- **Asking instead of waiting.** LLDP switches send every 30 s and CDP every 60 s. The run first sends one LLDP frame announcing an LLDP-MED class I endpoint (chassis and port ID by MAC, TTL 120). An LLDP-MED switch answers that at once (fast start, ANSI/TIA-1057), so a typical managed switch is heard within a second. The run then waits up to 32 s, and stops 3 s after the first LLDP or CDP frame, which leaves time for the 802.1X answer.
+- **The filter.** LLDP, CDP and EAPOL go to multicast addresses, so receive control bit 3 (pass all multicast) is set for the run and the value read before is restored, as for IPv6.
+- **Parsing.** Every TLV length is bounds-checked against the frame. Text is cut to 31 characters and non-printable bytes become `?`. An ID that is six non-printable bytes is shown as a MAC address. When a switch sends both, LLDP's name and port win over CDP's.
+- **Rows** that the switch did not announce are NONE; a missing link makes the rest SKIPPED. The countdown in the Switch row is redrawn once a second.
+- **RAM.** The state (168 bytes, its layout pinned by a `_Static_assert`) is at `0x20020100`, after the checklist's. `lpm_link_open` clears it, so Link status always opens on the checklist.
+
+The emulator (`preview_link_status.py`) has four more scenarios. In each, Link status is opened with the cable unplugged, then the cable is plugged in, `RIGHT` is pressed, then `M`:
+- an LLDP-MED switch (answering the fast start, with tagged frames, PoE class 4 at 25.5 W and a 64-character description);
+- a CDP-only switch that answers at 9 s on an 802.1X port;
+- a silent switch;
+- no link.
+
+Each scenario checks the rows and details, the LLDP and EAPOL frames sent, the listening time, the number of EAPOL-Starts, and the receive control being restored. It also checks that `LEFT` brings the checklist back.
+
 **Not done yet:**
-- The design's DHCP tab (the DISCOVER/OFFER/REQUEST/ACK timeline). `L/R` does nothing.
+- The design's DHCP tab (the DISCOVER/OFFER/REQUEST/ACK timeline).
+- CDP is only heard when the switch's 60 s timer falls inside the 32 s window, since CDP has no request.
+
+## Theme (added 2026-10-21; emulator only, not yet on the tester)
+
+The vendor tools now use the home screen's navy theme and Terminus font, while their layouts and logic stay unchanged (`src/firmware_patch/theme.c`).
+
+**Every pixel goes through five routines.** Rendering all 161 vendor screens in the emulator (`scripts/preview_vendor.py`) and following the LCD writes shows that every one passes through five small routines, so their entries now branch (`b.w`) to replacements:
+
+| Vendor routine | Replacement | Used by |
+| --- | --- | --- |
+| `0x080182A4` clear(colour) | `lpm_theme_clear` | screen clears |
+| `0x08018450` draw_point(x, y), colour at `0x200001A0` | `lpm_theme_point` | lines, frame polylines (`0x080184B4`), the picture blitter (`0x080183EC`) |
+| `0x08018568` fill_rect(x0, y0, x1, y1, colour) | `lpm_theme_fill_rect` | boxes, panels, bars |
+| `0x080188A4` plot(x, y, colour), at y + 40 | `lpm_theme_plot` | the vendor chart plotter |
+| `0x08018A34` draw_char(x, y, c, size, mode) | `lpm_theme_char` | `draw_string` `0x08018D48` and the number drawers; size 12 is 6×12, anything else 8×16; mode 0 opaque, 1 transparent |
+
+**Colours are mapped by value.** The 17 vendor colours measured over those screens map to theme colours:
+
+| Vendor | Theme |
+| --- | --- |
+| `0x0000` background | BG |
+| `0xFFFF` text | FG |
+| `0x2105` frame body | PANEL |
+| `0x31A7` input boxes and frame edges | FIELD |
+| `0x4A69` label boxes and disabled text | RAISED |
+| `0x7304` selection fill | ACCENT_DIM |
+| `0xFE60` selection outline and text | ACCENT |
+| the blues | ACCENT |
+| the yellows and orange | WARN |
+| the greens | PASS |
+| the reds | FAULT |
+
+Anti-aliased picture pixels that are near-grey are moved onto the background-to-foreground ramp, and selection yellows become the accent at the same brightness. The theme's own colours pass unchanged (the added screens also call `fill_rect`), and a test checks that no vendor key is itself a theme colour.
+
+**Text.** Every character goes through `draw_char`, so the vendor screens draw in Terminus too. The font now keeps all 95 printable ASCII characters.
+
+**Titles.** The tool frame's title (`draw_string(13, 21, 88, 20, 16, label)` at `0x0800F3F8`) is redirected to `lpm_tool_title`, which draws the name from the home list ("Ping monitor", not "PING") in a 120-pixel field.
+
+The vendor frame geometry is kept: a full home-style header would overlap content that starts near y 45.
 
 ## Settings record (V2.0.3, RAM copy)
 

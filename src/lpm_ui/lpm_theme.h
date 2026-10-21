@@ -10,6 +10,11 @@
 #define LPM_C_RULE LPM_RGB565(0x2a, 0x3b, 0x48)
 #define LPM_C_ACCENT LPM_RGB565(0x15, 0x98, 0xca) /* the only selection accent */
 #define LPM_C_ON_ACCENT LPM_RGB565(0x07, 0x19, 0x21)
+/* Used by the theme for vendor screens (src/firmware_patch/theme.c). */
+#define LPM_C_PANEL LPM_RGB565(0x15, 0x20, 0x2a)      /* a card, just above the background */
+#define LPM_C_FIELD LPM_RGB565(0x20, 0x2e, 0x3a)      /* input boxes and frame edges */
+#define LPM_C_RAISED LPM_RGB565(0x3c, 0x50, 0x60)     /* label boxes, disabled controls */
+#define LPM_C_ACCENT_DIM LPM_RGB565(0x0c, 0x45, 0x5e) /* the fill behind an accent outline */
 /* Semantic colours always accompany a word such as PASS, OPEN or FAIL. */
 #define LPM_C_PASS LPM_RGB565(0x5c, 0xc8, 0x7e)
 #define LPM_C_WARN LPM_RGB565(0xf2, 0xb3, 0x3d)

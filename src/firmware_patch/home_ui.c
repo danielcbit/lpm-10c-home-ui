@@ -29,6 +29,7 @@
 #define MENU_STATE ((volatile uint8_t *)0x20000150u)
 
 #define post_message ((void (*)(int, int, int))0x0800E961u)
+#define vendor_draw_string ((void (*)(uint16_t, uint16_t, uint16_t, uint16_t, uint16_t, const char *))0x08018D49u)
 
 #define LINK_SYS_STATE 8 /* Link status, whose UP and DOWN arrive here */
 #define FIRST_STATE 4
@@ -121,6 +122,22 @@ void lpm_home_draw(int partial)
         fill(0, end, LPM_SCREEN_W, LPM_FOOTER_Y - end, LPM_C_BG);
         draw_footer("M open", "UP/DOWN select");
     }
+}
+
+/* Replaces the title draw_string(x, y, w, h, size, label) at 0x0800F3F8 in the vendor tool
+ * frame: the tool's name as the home list shows it, in a field wide enough for it (the
+ * vendor's 88 pixels hold 11 characters). Other states keep the vendor label. */
+#define TITLE_W 120
+
+void lpm_tool_title(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t size, const char *label)
+{
+    int vendor = MENU_STATE[0] - FIRST_STATE;
+    for (int i = 0; i < ITEMS; i++)
+        if (items[i].vendor == vendor) {
+            label = items[i].name;
+            w = TITLE_W;
+        }
+    vendor_draw_string(x, y, w, h, size, label);
 }
 
 /* Replaces 0x080180C0. Actions 2 (up) and 4 (left) select the previous item,

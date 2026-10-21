@@ -4,6 +4,20 @@ Each release is a patch for the official FNIRSI LPM-10C **V2.0.7** TX update
 (`LPM-10C_TX_V2.0.7_260907.bin`). The release workflow publishes the section
 whose heading matches the tag.
 
+## Unreleased
+
+**Switch port** (a second Link status tab: RIGHT shows it, LEFT returns)
+- Listens for LLDP and CDP and shows the switch's name and model, the port, the
+  port and voice VLANs, any 802.1Q tags seen, the management address, and the
+  PoE class and allocated power.
+- Sends an LLDP-MED announcement first, so LLDP-MED switches answer at once.
+- Sends EAPOL-Start and reports whether the port requires 802.1X.
+
+**Theme for the vendor tools**
+- Every vendor screen uses the home screen's colours and the Terminus font,
+  with titles from the home list ("Ping monitor", "IP scan", ...). Layouts and
+  behaviour are unchanged.
+
 ## v1.0.0
 
 First public release of the `home-ui` firmware patch.

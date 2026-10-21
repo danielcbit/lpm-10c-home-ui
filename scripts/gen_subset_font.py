@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Generate a font holding only the characters the patched screens actually draw.
+"""Generate the 6x12 and 8x16 fonts the patched screens draw with.
 
-The update file cannot grow past the vendor size, so whole fonts do not fit
-beside the rest of the added code. The screens only ever show a few dozen
-characters, so this emits those glyphs plus a small lookup table, and leaves the
-glyph shapes untouched.
+This started as a subset of the characters the added screens draw, when the
+update file had no room for whole fonts. The theme now draws every vendor screen
+with it as well (theme.c), and vendor text can be any printable ASCII, so all 95
+printable characters are kept (BASELINE); the lookup table is still emitted.
 
 The character set is read from the string literals in the sources that draw with
 this font (SCREEN_SOURCES), so adding text to a screen and rebuilding keeps the
@@ -36,7 +36,9 @@ PATCH_DIR = ROOT / 'src' / 'firmware_patch'
 FIRST, COUNT = 32, 95  # the design fonts cover printable ASCII
 # Always present: digits and the separators that screens build character by character at run time
 # (a counter such as "7/10", an IP address, a percentage) never appear as string literals.
-BASELINE = set('0123456789./:%-')
+# The theme draws every vendor screen with this font too (theme.c replaces the vendor
+# draw_char), and vendor text can be any printable ASCII, so all of it is kept.
+BASELINE = {chr(c) for c in range(0x20, 0x7F)}
 
 TERMINUS = ROOT / 'src' / 'fonts' / 'terminus-4.49.1'
 DEFAULT = {'small': TERMINUS / 'ter-u12n.bdf', 'body': TERMINUS / 'ter-u16n.bdf'}
@@ -53,7 +55,7 @@ VENDOR_FONTS = {  # role -> (flash address, width, rows, baseline row); two byte
 }
 # The sources whose text() calls draw with this font. Others (menu_list.c, vendor_text.c) draw
 # with the vendor routines, so their strings need no glyphs here.
-SCREEN_SOURCES = ('home_ui.c', 'link_status.c', 'draw.c')
+SCREEN_SOURCES = ('home_ui.c', 'link_status.c', 'switch_port.c', 'draw.c')
 
 
 def read_font(source, name):

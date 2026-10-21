@@ -36,8 +36,8 @@ contains the reverse-engineering notes, tools and emulator that made it possible
 ## What it changes
 
 All other vendor tools (cable map, length, trace, port flash, PoE, link speed,
-ping, IP scan, settings) are the vendor's own code, unchanged. They are only
-reached from the new home screen.
+ping, IP scan, settings) are the vendor's own code. They are reached from the
+new home screen, and (since the next release) drawn in its theme.
 
 **Home screen**
 - One scrolling list of the ten tools, each with an icon and a plain name,
@@ -71,13 +71,32 @@ The list scrolls with UP/DOWN and follows the check in progress. The tester
 answers ARP and IPv6 neighbour solicitations while it runs, so routers can
 reach it.
 
+**Switch port** (unreleased; the second Link status tab, RIGHT to show it).
+Press M to listen for what the switch says about its port, for up to 32 s:
+
+| Row | Shows |
+| --- | --- |
+| Switch | Name and model, from LLDP or CDP |
+| Port | Port ID and description |
+| VLAN | Port (native) VLAN, voice VLAN, and any 802.1Q tags seen on the wire |
+| Management | The switch's management address |
+| PoE | The class and power the switch allocates |
+| 802.1X | Whether the port asks for authentication (an EAP request answering an EAPOL-Start) |
+
+The tester announces itself as an LLDP-MED endpoint first, so LLDP-MED
+switches answer at once instead of at their next 30 s interval.
+
+**Theme for the vendor tools** (unreleased). Every vendor screen now uses the
+home screen's colours and Terminus font. Tool titles use the home list names.
+Layouts and behaviour are unchanged.
+
 **Fixes**
 - The flash wear bug, below.
 
 **Space**
 - 139 KB of vendor pictures and code that nothing reaches any more (the old
   grid menu, Chinese glyphs and pictures) are cleared for reuse, leaving
-  about 119 KB free for future tools. `scripts/check_dead_code.py` checks that
+  about 117 KB free for future tools. `scripts/check_dead_code.py` checks that
   nothing references a region before it is reused.
 
 The full list per release is in [CHANGELOG.md](CHANGELOG.md).
@@ -95,6 +114,10 @@ simulated network. The display and fonts are the tester's own, pixel for pixel.
 | Link status: SLAAC | Link status: DHCPv6 lease | No Internet access |
 | --- | --- | --- |
 | ![IPv6 end of the list](docs/images/link-status-ipv6.png) | ![DHCPv6 address leased](docs/images/link-status-dhcpv6.png) | ![Internet ping and DNS failing](docs/images/link-status-no-internet.png) |
+
+| Switch port: LLDP | Switch port: end | Ping monitor, themed | Cable map, themed |
+| --- | --- | --- | --- |
+| ![Switch name, port and VLANs from LLDP](docs/images/switch-port.png) | ![Management address, PoE and 802.1X](docs/images/switch-port-end.png) | ![The vendor ping tool in the theme](docs/images/ping-themed.png) | ![The vendor cable map in the theme](docs/images/cable-map-themed.png) |
 
 The green arrow in the top-left corner of the Link status screens points to the
 port to use.
