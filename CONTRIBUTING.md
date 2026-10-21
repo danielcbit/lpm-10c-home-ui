@@ -9,7 +9,8 @@ and not publishing things that are not ours to publish.
 - **Never commit FNIRSI firmware.** No vendor `.zip` or `.bin`, no extracted or
   patched images, no disassembly listings of vendor code longer than the few
   instructions a patch note needs. `.gitignore` keeps `firmware/` and `*.bin`
-  out; do not force-add them. Releases publish a byte patch, never an image.
+  out; do not force-add them. Releases publish a byte patch, never an image,
+  and `lpm_patch.py` refuses to write a patch that repeats any vendor byte.
 - **Never commit captures from your unit.** UART logs, SWD dumps, settings
   records and photos carry your MAC address, network settings and calibration.
   Keep them under `evidence/` (ignored). The emulator runs from

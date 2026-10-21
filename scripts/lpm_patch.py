@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Daniel Bittencourt
 """Make or apply a release patch for the FNIRSI LPM-10C TX firmware V2.0.7.
 
-Releases do not include FNIRSI's firmware. They include a patch: the byte
-ranges in which a build differs from the vendor V2.0.7 update file, with the
+Releases do not include FNIRSI's firmware. They include a patch: only the bytes
+in which a build differs from the vendor V2.0.7 update file, with the
 SHA-256 of the vendor file it applies to and of the file it produces. Applying
 it to your own copy of the official update rebuilds the exact image that was
 released, or fails without writing anything.
@@ -33,7 +35,6 @@ FORMAT = 'lpm-10c-patch/1'
 VENDOR_NAME = 'LPM-10C_TX_V2.0.7_260907.bin'
 VENDOR_SHA256 = '3bcc50065e16e93ddeff5fb9dce04f1b0447fd3f68a084803070978aef2bcaaa'
 VENDOR_DIR = Path('firmware') / 'extracted' / 'LPM-10C' / 'LPM-10C_V2.0.7'  # relative to the repository root
-MERGE_GAP = 16  # equal bytes shorter than this between two changes are folded into one range
 
 
 def sha256(data):
@@ -70,20 +71,24 @@ def read_vendor(path):
 
 
 def ranges(old, new):
-    """(offset, new bytes) for every run where new differs from old; old and new have the same length."""
-    out, start, last = [], None, None
+    """(offset, new bytes) for every run of bytes where new differs from old; old and new have the
+    same length. Runs are never merged across equal bytes, so a patch holds no byte of the vendor file."""
+    out, start = [], None
     for i, (a, b) in enumerate(zip(old, new)):
-        if a == b:
-            continue
-        if start is not None and i - last <= MERGE_GAP:
-            last = i
-            continue
-        if start is not None:
-            out.append((start, new[start:last + 1]))
-        start = last = i
+        if a != b and start is None:
+            start = i
+        elif a == b and start is not None:
+            out.append((start, new[start:i]))
+            start = None
     if start is not None:
-        out.append((start, new[start:last + 1]))
+        out.append((start, new[start:]))
     return out
+
+
+def vendor_bytes(vendor, patch_ranges):
+    """Offsets where a patch range repeats the vendor byte: a patch must have none."""
+    return [r['offset'] + i for r in patch_ranges
+            for i, b in enumerate(bytes.fromhex(r['bytes'])) if vendor[r['offset'] + i] == b]
 
 
 def make(args):
@@ -101,6 +106,8 @@ def make(args):
         'output_sha256': sha256(built),
         'ranges': [{'offset': offset, 'bytes': data.hex()} for offset, data in ranges(vendor, built)],
     }
+    if vendor_bytes(vendor, patch['ranges']):
+        raise SystemExit('Internal error: the patch would contain vendor bytes')
     Path(args.out).write_text(json.dumps(patch, indent=1) + '\n')
     changed = sum(len(r['bytes']) // 2 for r in patch['ranges'])
     print(f'Wrote {args.out}: {len(patch["ranges"])} ranges, {changed} bytes, output SHA-256 {patch["output_sha256"]}')

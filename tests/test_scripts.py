@@ -146,7 +146,7 @@ class ReleasePatchTests(unittest.TestCase):
         self.vendor = bytes(range(256)) * 16
         built = bytearray(self.vendor)
         built[10:14] = b'\xaa' * 4
-        built[20] ^= 0xFF  # 6 equal bytes after the first change: folded into one range
+        built[20] ^= 0xFF  # a separate range: the equal bytes between are not included
         built[3000:3002] = b'\x00\x01'
         self.built = bytes(built)
         self.patch = {'format': lpm_patch.FORMAT, 'name': 't', 'output_name': lpm_patch.VENDOR_NAME,
@@ -162,8 +162,12 @@ class ReleasePatchTests(unittest.TestCase):
             lpm_patch.main(['apply', str(Path(tmp) / 'v.bin'), str(Path(tmp) / 'p.json'), '--out', tmp])
             return (Path(tmp) / lpm_patch.VENDOR_NAME).read_bytes()
 
-    def test_ranges_cover_every_change_and_fold_short_gaps(self):
-        self.assertEqual([(o, len(d)) for o, d in lpm_patch.ranges(self.vendor, self.built)], [(10, 11), (3000, 2)])
+    def test_ranges_cover_every_change_and_nothing_else(self):
+        self.assertEqual([(o, len(d)) for o, d in lpm_patch.ranges(self.vendor, self.built)],
+                         [(10, 4), (20, 1), (3000, 2)])
+
+    def test_patch_holds_no_vendor_byte(self):
+        self.assertEqual(lpm_patch.vendor_bytes(self.vendor, self.patch['ranges']), [])
 
     def test_apply_rebuilds_the_exact_image(self):
         self.assertEqual(self.apply(self.vendor, self.patch), self.built)

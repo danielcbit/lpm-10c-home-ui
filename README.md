@@ -171,7 +171,9 @@ Details: [board inspection](docs/lpm-10c-board-inspection.md),
 ## Installing
 
 Releases contain **no FNIRSI firmware**. Each one contains a patch file
-(`lpm-10c-home-ui-vX.Y.Z.patch.json`) and `lpm_patch.py`. The patch rebuilds the
+(`lpm-10c-home-ui-vX.Y.Z.patch.json`), `lpm_patch.py`, `LICENSE` and `NOTICE`.
+The patch holds only the bytes this project wrote, never a byte of FNIRSI's
+image, so it is useless without your own copy of the official update. The patch rebuilds the
 released image from your own copy of the official update, and refuses to run
 unless both the input and the result match the expected SHA-256.
 

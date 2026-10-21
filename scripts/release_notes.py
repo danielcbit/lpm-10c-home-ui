@@ -53,6 +53,7 @@ def main():
     patch = json.loads(patch_file.read_text())
     sha = patch['output_sha256']
     confirmed = tested(sha)
+    repo = f"{os.environ.get('GITHUB_SERVER_URL', 'https://github.com')}/{os.environ.get('GITHUB_REPOSITORY', 'OWNER/REPO')}"
     changed = sum(len(r['bytes']) // 2 for r in patch['ranges'])
     print(changelog_section(tag))
     print(f'''
@@ -83,6 +84,11 @@ tester unusable, and nobody but you is responsible for that.
 | Bytes changed | {changed} in {len(patch["ranges"])} ranges, file size unchanged ({patch["size"]} bytes) |
 | Confirmed on a tester | {"yes: " + confirmed if confirmed else "**no**: this exact image has not been installed on a tester yet"} |
 | Toolchain | {tool_version([os.environ.get("CLANG", "clang"), "--version"])}; {tool_version(["ld.lld", "--version"])} |
+
+## License
+
+GNU General Public License v3.0 or later (`LICENSE`, `NOTICE`). The patch contains only bytes
+written by this project, none of FNIRSI's. Corresponding source: {repo}/tree/{tag}
 ''')
     return 0
 
