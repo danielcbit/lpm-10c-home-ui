@@ -1,0 +1,20 @@
+# Build output
+build/
+dist/
+output/
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+
+# Never published: FNIRSI firmware (vendor zips, extracted and patched images,
+# analysis output) and captures from the author's unit (UART, SWD, photos).
+firmware/
+evidence/
+*.bin
+!tests/fixtures/sram-sanitized.bin
+*.zip
+
+# Local tool state
+.luna/
+.claude/

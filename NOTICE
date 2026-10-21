@@ -1,0 +1,44 @@
+LPM-10C home UI
+Copyright (C) 2026 Daniel Bittencourt
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program (the file LICENSE). If not, see <https://www.gnu.org/licenses/>.
+
+
+Additional permission under GNU GPL version 3 section 7
+-------------------------------------------------------
+
+If you modify this program, or any covered work, by combining it with the
+Terminus Font glyph data in src/fonts/terminus-4.49.1 (or a subset of it, such
+as src/firmware_patch/subset_font.c and subset_font.h), licensed under the SIL
+Open Font License 1.1, the licensors of this program grant you additional
+permission to convey the resulting work. The font data remains under the SIL
+Open Font License 1.1, and its copyright notice and license must be kept.
+
+No other additional permission is granted. In particular, conveying this
+program combined with FNIRSI firmware, or with any other proprietary firmware,
+requires that the whole combined work be conveyed under the terms of the GNU
+General Public License version 3, including its Corresponding Source.
+
+
+Third-party material
+--------------------
+
+Terminus Font 4.49.1 (src/fonts/terminus-4.49.1), Copyright (C) 2020 Dimitar
+Toshkov Zhekov, with Reserved Font Name "Terminus Font", is licensed under the
+SIL Open Font License, Version 1.1 (src/fonts/terminus-4.49.1/OFL.TXT). It is
+not covered by the GNU General Public License.
+
+FNIRSI firmware is not part of this repository or of its releases, and is not
+covered by either license. Release patches contain only bytes written by this
+project. FNIRSI and LPM-10C are trademarks of their owner; this project is not
+affiliated with or endorsed by FNIRSI.
