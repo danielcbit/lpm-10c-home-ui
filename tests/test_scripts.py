@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / 'scripts'))
 
 import build_patched_image  # noqa: E402
+import lpm_patch  # noqa: E402
 import swd_identify  # noqa: E402
 import swd_sram_dump  # noqa: E402
 import uart_baud  # noqa: E402
@@ -136,6 +137,45 @@ class UartBaudTests(unittest.TestCase):
 
     def test_too_few_transitions_gives_no_estimate(self):
         self.assertIsNone(uart_baud.estimate_bit_time([(False, 9)] * 5, 1e6))
+
+
+class ReleasePatchTests(unittest.TestCase):
+    """lpm_patch.py on synthetic images: no vendor firmware needed."""
+
+    def setUp(self):
+        self.vendor = bytes(range(256)) * 16
+        built = bytearray(self.vendor)
+        built[10:14] = b'\xaa' * 4
+        built[20] ^= 0xFF  # 6 equal bytes after the first change: folded into one range
+        built[3000:3002] = b'\x00\x01'
+        self.built = bytes(built)
+        self.patch = {'format': lpm_patch.FORMAT, 'name': 't', 'output_name': lpm_patch.VENDOR_NAME,
+                      'size': len(self.vendor), 'vendor_sha256': lpm_patch.sha256(self.vendor),
+                      'output_sha256': lpm_patch.sha256(self.built),
+                      'ranges': [{'offset': o, 'bytes': d.hex()} for o, d in lpm_patch.ranges(self.vendor, self.built)]}
+
+    def apply(self, vendor, patch):
+        import json
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / 'v.bin').write_bytes(vendor)
+            (Path(tmp) / 'p.json').write_text(json.dumps(patch))
+            lpm_patch.main(['apply', str(Path(tmp) / 'v.bin'), str(Path(tmp) / 'p.json'), '--out', tmp])
+            return (Path(tmp) / lpm_patch.VENDOR_NAME).read_bytes()
+
+    def test_ranges_cover_every_change_and_fold_short_gaps(self):
+        self.assertEqual([(o, len(d)) for o, d in lpm_patch.ranges(self.vendor, self.built)], [(10, 11), (3000, 2)])
+
+    def test_apply_rebuilds_the_exact_image(self):
+        self.assertEqual(self.apply(self.vendor, self.patch), self.built)
+
+    def test_apply_refuses_another_vendor_file(self):
+        with self.assertRaises(SystemExit):
+            self.apply(self.vendor[:-1] + b'\x00', self.patch)
+
+    def test_apply_refuses_a_patch_whose_result_does_not_match(self):
+        self.patch['output_sha256'] = '0' * 64
+        with self.assertRaises(SystemExit):
+            self.apply(self.vendor, self.patch)
 
 
 class PatchedImageTests(unittest.TestCase):

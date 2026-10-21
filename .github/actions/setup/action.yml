@@ -1,0 +1,76 @@
+name: Set up the build
+description: >
+  LLVM (clang and ld.lld for the Cortex-M4 code), Python with unicorn and capstone,
+  and, when the repository variable VENDOR_ZIP_URL is set, the official FNIRSI
+  LPM-10C V2.0.7 update, checked by SHA-256 and extracted where the build expects it.
+inputs:
+  vendor-zip-url:
+    description: URL of the official FNIRSI LPM-10C update .zip (repository variable VENDOR_ZIP_URL)
+    required: false
+    default: ''
+  llvm-version:
+    description: LLVM release used for the firmware code
+    required: false
+    default: '22.1.8'
+outputs:
+  vendor:
+    description: "'true' when the vendor image was downloaded and verified"
+    value: ${{ steps.vendor.outputs.present }}
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.12'
+
+    - name: Python packages
+      shell: bash
+      run: python -m pip install --quiet unicorn==2.1.4 capstone==5.0.7
+
+    - name: Cache LLVM
+      id: llvm-cache
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/llvm
+        key: llvm-${{ inputs.llvm-version }}-${{ runner.os }}
+
+    - name: Download LLVM ${{ inputs.llvm-version }}
+      if: steps.llvm-cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "$RUNNER_TEMP/llvm"
+        curl -fsSL "https://github.com/llvm/llvm-project/releases/download/llvmorg-${{ inputs.llvm-version }}/LLVM-${{ inputs.llvm-version }}-Linux-X64.tar.xz" \
+          | tar -xJ -C "$RUNNER_TEMP/llvm" --strip-components=1
+
+    - name: Use LLVM
+      shell: bash
+      run: |
+        echo "CLANG=$RUNNER_TEMP/llvm/bin/clang" >> "$GITHUB_ENV"
+        echo "$RUNNER_TEMP/llvm/bin" >> "$GITHUB_PATH"
+        "$RUNNER_TEMP/llvm/bin/clang" --version | head -1
+        "$RUNNER_TEMP/llvm/bin/ld.lld" --version
+
+    - name: Cache the vendor update
+      if: inputs.vendor-zip-url != ''
+      uses: actions/cache@v4
+      with:
+        path: ${{ runner.temp }}/vendor
+        key: vendor-lpm-10c-v2.0.7-${{ hashFiles('scripts/lpm_patch.py') }}
+
+    - name: Vendor firmware
+      id: vendor
+      shell: bash
+      env:
+        VENDOR_ZIP_URL: ${{ inputs.vendor-zip-url }}
+      run: |
+        set -euo pipefail
+        if [ -z "$VENDOR_ZIP_URL" ]; then
+          echo "::notice::VENDOR_ZIP_URL is not set: firmware build and emulator tests are skipped"
+          echo "present=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        mkdir -p "$RUNNER_TEMP/vendor"
+        [ -s "$RUNNER_TEMP/vendor/LPM-10C.zip" ] || curl -fsSL -o "$RUNNER_TEMP/vendor/LPM-10C.zip" "$VENDOR_ZIP_URL"
+        python scripts/lpm_patch.py extract "$RUNNER_TEMP/vendor/LPM-10C.zip"
+        echo "present=true" >> "$GITHUB_OUTPUT"

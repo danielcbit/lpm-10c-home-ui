@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: setup
+        uses: ./.github/actions/setup
+        with:
+          vendor-zip-url: ${{ vars.VENDOR_ZIP_URL }}
+
+      # Host C tests (ASan/UBSan), script tests, generated-asset check and, with the
+      # vendor image present, the firmware patch tests and the Link status emulator.
+      - name: Tests
+        run: make test CC=clang PYTHON=python
+
+      - name: Build home-ui
+        if: steps.setup.outputs.vendor == 'true'
+        run: |
+          python scripts/build_patched_image.py home-ui
+          mkdir -p dist
+          python scripts/lpm_patch.py make firmware/extracted/LPM-10C/LPM-10C_V2.0.7/LPM-10C_TX_V2.0.7_260907.bin \
+            firmware/patched/home-ui/LPM-10C_TX_V2.0.7_260907.bin dist/lpm-10c-home-ui-${GITHUB_SHA::8}.patch.json \
+            --name "${GITHUB_SHA::8}"
+
+      # The patch only: the vendor firmware and the patched image are not published.
+      - uses: actions/upload-artifact@v4
+        if: steps.setup.outputs.vendor == 'true'
+        with:
+          name: home-ui-patch
+          path: dist/*.patch.json
+          if-no-files-found: error
