@@ -50,8 +50,9 @@ new home screen, and (since the next release) drawn in its theme.
 - The battery icon no longer flashes while you scroll.
 
 **Link status** (new, in the slot of the vendor QC test). Plug the cable into
-the **top-left port**, marked by the vendor's green arrow, and press M. Each
-step shows PASS, WARN, FAIL, SKIP or NONE with details:
+the **top-left port**, marked by the vendor's green arrow, open the tool and
+press M to start the checks (the tool opens waiting, so you can plug in first;
+M again re-runs them). Each step shows PASS, WARN, FAIL, SKIP or NONE with details:
 
 | Step | What it checks |
 | --- | --- |

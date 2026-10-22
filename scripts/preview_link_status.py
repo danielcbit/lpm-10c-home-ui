@@ -29,7 +29,7 @@ routines it calls are replaced by a model, so each scenario can be checked:
 set_sysState, post_message and the battery icon are recorded, not run.
 
 For every scenario it opens the screen (lpm_link_open, as M on the home item),
-draws it the way the GUI task would (lpm_tool_frame for message 0x36, then
+checks that nothing ran, presses M (lpm_link_run, event 0x0B), draws it the way the GUI task would (lpm_tool_frame for message 0x36, then
 lpm_link_draw for each 0x0C), checks the results, and writes two PNGs: the top
 of the list (IPv4) and its end (IPv6). The frame runs the vendor arrow routine
 for real, and the green arrow must mark the top-left port and no other. It also checks that the run leaves the
@@ -1101,7 +1101,20 @@ def main():
         before = {region: bytes(tester.uc.mem_read(*region)) for region in (IP_CONFIG, CUST_INFO)}
         tester.uc.mem_write(LINK, b'\xa5' * STATE.size)  # whatever the RAM held: the open must clear it
         top = tester.lowest_sp
+        started_us = net.us
         tester.call(open_)
+        opened = read_state(tester.uc)
+        if net.us != started_us or any(step != '--' for step in opened['steps']):  # no network routine ran
+            problems_open = [f'checks ran before M: {opened["steps"]}']
+        else:
+            problems_open = []
+        if name == 'all-pass':  # the screen as it opens
+            tester.call(frame)
+            tester.call(draw)
+            P.png(args.out / 'link-status-waiting.png', tester.fb, P.W, P.H)
+            if 'Press M to start the checks' not in ' | '.join(tester.drawn):
+                problems_open.append('no "Press M" hint on opening')
+        tester.call(run)  # M (event 0x0B)
         run_stack = top - tester.lowest_sp
         state = read_state(tester.uc)
         # What the GUI task does with the posted messages: the frame for 0x36, the rows for 0x0C. The run
@@ -1118,7 +1131,7 @@ def main():
         draw_stack = top - tester.lowest_sp
         deepest = max(deepest, run_stack, draw_stack)
         P.png(args.out / f'{name}-end.png', tester.fb, P.W, P.H)
-        problems = list(net.errors) + arrow_problems
+        problems = list(net.errors) + arrow_problems + problems_open
         steps = [state['steps'][r] for r in IPV4_ROWS] + [state['steps'][r] for r in IPV6_ROWS]
         if steps != expected:
             problems.append(f'steps {steps}, expected {expected}')

@@ -493,7 +493,7 @@ A new test, described by the owner: it checks the physical link, gets an address
 
 | Site | Was | Now |
 | --- | --- | --- |
-| `0x0800D830` (event 6) | QC open `0x0800BAE4` | `lpm_link_open`: clear the state, `set_sysState(8)`, run |
+| `0x0800D830` (event 6) | QC open `0x0800BAE4` | `lpm_link_open`: clear the state, `set_sysState(8)`; the checks wait for M (since 2026-10-22; they used to start at once) |
 | `0x0800D8CC` (event `0x0B`) | QC count init `0x0800BD98` | `lpm_link_run` |
 | `0x0800FABE` (message `0x0C`) | QC draw `0x0800BB0C` | `lpm_link_draw`: the rows that fit from the top one, and the scroll bar |
 | `0x0800FC20` (message `0x36`) | tool frame `0x0800EE8C` | `lpm_tool_frame`: in state 8 the whole screen in the design, then the vendor battery icon; otherwise the vendor frame |

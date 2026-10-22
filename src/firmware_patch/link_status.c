@@ -26,6 +26,8 @@
  * Nothing is saved: the vendor's own Auto Config IP writes its result to the
  * settings, this never touches them.
  *
+ * It opens waiting: M runs the checks, and M again runs them afresh.
+ *
  * The rows are a list taller than the screen: UP and DOWN scroll it a row at a
  * time, and while the checks run it follows the one running. LEFT and RIGHT
  * switch to the second tab, Switch port (switch_port.c), where M listens for
@@ -317,6 +319,8 @@ static void detail(const link_state *s, int row, char *p)
             put(p, s->full_duplex ? "full duplex" : "half duplex");
         } else if (step == LPM_STEP_FAIL) {
             put(p, "No link detected");
+        } else if (step == LPM_STEP_PENDING) {
+            put(p, "Press M to start the checks"); /* before the first run */
         }
     } else if (row == 1) {
         if (s->source != LPM_ADDR_NONE) {
@@ -1257,13 +1261,12 @@ void lpm_link_run(void)
     show();
 }
 
-/* M on the Link status item (event 6): enter state 8 and run once. */
+/* M on the Link status item (event 6): enter state 8 and wait for M. */
 void lpm_link_open(void)
 {
     clear(LINK); /* before set_sysState, whose frame message draws the state */
     lpm_switch_reset();
     set_sys_state(LINK_SYS_STATE);
-    lpm_link_run();
 }
 
 /* ---- for Ping monitor (ping_monitor.c, key task) ---------------------------- */

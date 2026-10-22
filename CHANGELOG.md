@@ -6,6 +6,10 @@ whose heading matches the tag.
 
 ## Unreleased
 
+**Link status**
+- Opens waiting for M instead of running the checks at once, so the cable can
+  be plugged in first.
+
 **Switch port** (a second Link status tab: RIGHT shows it, LEFT returns)
 - Listens for LLDP and CDP and shows the switch's name and model, the port, the
   port and voice VLANs, any 802.1Q tags seen, the management address, and the
