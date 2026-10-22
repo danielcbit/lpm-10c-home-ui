@@ -87,10 +87,11 @@ The tester announces itself as an LLDP-MED endpoint first, so LLDP-MED
 switches answer at once instead of at their next 30 s interval.
 
 **Ping monitor** (unreleased; replaces the vendor PING screen, which holding
-M still opens). One ping a second to the gateway, 1.1.1.1, 8.8.8.8 or the
-PING tool's saved target (LEFT/RIGHT), with the latest round trip, loss, a
-graph of the last 190 round trips, and min, average, max and variation. It
-gets its own address by DHCP, and keys respond immediately while it runs.
+M still opens). Press M to start and M to stop: one ping a second to the
+gateway, 1.1.1.1, 8.8.8.8 or the PING tool's saved target (LEFT/RIGHT), with
+the latest round trip, loss, a graph of the last 190 round trips, and min,
+average, max and variation. Each run gets its own address by DHCP; it stops
+with NO LINK if the cable is pulled, and keeps the tester on while it runs.
 
 **Theme for the vendor tools** (unreleased). Every vendor screen now uses the
 home screen's colours and Terminus font. Tool titles use the home list names.

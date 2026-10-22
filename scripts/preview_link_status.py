@@ -204,7 +204,7 @@ class Network:
                  dns_answers=(GATEWAY, LOCAL_DNS, CLOUDFLARE), dns_rcode=None, cname=False,
                  ra=True, lifetime=1800, managed=False, autonomous=True, dhcp6=None, echo6=True,
                  internet6=(CLOUDFLARE6, GOOGLE6), slaac_in_use=False, lldp=None, cdp=None, cdp_at_ms=None,
-                 dot1x=False, tagged=(), ping_rtts=None, keys=()):
+                 dot1x=False, tagged=(), ping_rtts=None, keys=(), link_down_at=None):
         self.t, self.uc = tester, tester.uc
         self.link, self.ten, self.full, self.offer, self.ack = link, ten, full, offer, ack
         self.gateway, self.arp, self.echo, self.arp_first = gateway, arp, echo, arp_first
@@ -234,6 +234,10 @@ class Network:
         # (time in us, key, press) items of the key task's queue.
         self.ping_rtts, self.keys = list(ping_rtts) if ping_rtts is not None else None, list(keys)
         self.echo_times = []
+        self.link_down_at = link_down_at  # the cable is pulled at this time (us)
+        self.keys_dropped = 0
+        self.idle_resets = 0
+        self.app_commands = []
         if cdp is not None:
             self.queue.append((cdp_at_ms * 1000, cdp))
         self.stubs = {0x08016A70: self.dm9051_read, 0x08016AE0: self.dm9051_write, 0x08022088: self.wait_link,
@@ -244,7 +248,8 @@ class Network:
                       # In the vendor arrow 0x0800E408: the FreeRTOS critical section (msr BASEPRI, which the
                       # emulator lacks) and the queue send of its UART log line. The drawing itself runs.
                       0x0802443C: lambda: 0, 0x08024460: lambda: 0, 0x08024828: lambda: 1,
-                      0x08024940: self.queue_receive}
+                      0x08024940: self.queue_receive, 0x0800FF04: self.idle_reset,
+                      0x08015114: self.app_command}
 
     def arg(self, n):
         return self.t._arg(n)
@@ -258,7 +263,7 @@ class Network:
         reg = self.arg(0)
         if reg == 1:
             ready = any(at <= self.us for at, _ in self.queue)
-            return (0x40 if self.link else 0) | (0x80 if self.ten else 0) | (1 if ready else 0)
+            return (0x40 if self.linked() else 0) | (0x80 if self.ten else 0) | (1 if ready else 0)
         if reg == 0:
             return 0x08 if self.full else 0
         if reg == 5:
@@ -387,7 +392,9 @@ class Network:
             ask = b'\xff' * 6 + GATEWAY_MAC + b'\x08\x06' + bytes.fromhex('000108000604 0001') + GATEWAY_MAC \
                 + self.gateway + bytes(6) + OUR_IP
             self.queue.append((self.us + 100, ask))
-        if self.ping_rtts:
+        if not self.linked():
+            answers, delay_us = False, 0
+        elif self.ping_rtts:
             delay_us = self.ping_rtts.pop(0)
             answers = delay_us is not None
         elif target == self.gateway:
@@ -428,15 +435,37 @@ class Network:
             self.queue.append((self.us + 20_000, request + bytes(60 - len(request))))
         return 0
 
+    def linked(self):
+        return self.link and (self.link_down_at is None or self.us < self.link_down_at)
+
+    def idle_reset(self):
+        self.idle_resets += 1
+        return 0
+
+    def app_command(self):
+        self.app_commands.append(self.arg(0))
+        return 0
+
+    def key(self):
+        """The next key whose time has come, as the vendor key scan (0x0801630E) queues it: never while the
+        network busy flag is set, when the press is lost."""
+        if not self.keys or self.keys[0][0] > self.us:
+            return None
+        _, key, press = self.keys.pop(0)
+        if self.uc.mem_read(NET_BUSY, 1)[0]:
+            self.keys_dropped += 1
+            return None
+        return bytes([key, press])
+
     def queue_receive(self):
         """xQueueReceive(queue, item, ticks) on the key queue: the next key once its time has come. Only
         Ping monitor polls without blocking; anything else would wait forever here."""
         queue, item, ticks = self.arg(0), self.arg(1), self.arg(2)
         if ticks != 0 or queue != struct.unpack('<I', self.uc.mem_read(KEY_QUEUE, 4))[0]:
             self.errors.append(f'xQueueReceive({queue:#x}, ticks {ticks:#x})')
-        if self.keys and self.keys[0][0] <= self.us:
-            _, key, press = self.keys.pop(0)
-            self.write(item, bytes([key, press]))
+        item_bytes = self.key()
+        if item_bytes:
+            self.write(item, item_bytes)
             return 1
         return 0
 
@@ -791,11 +820,14 @@ def run_switch_scenario(image, sram, symbols, entries, settings, expected, fragm
 # ---- Ping monitor ------------------------------------------------------------------------------------------
 
 PING = 0x20020200  # ping_state in ping_monitor.c (its _Static_assert pins the layout)
-PING_STATE = struct.Struct('<190IQQ6IHBBBBBBBBBB4s6s')
+PING_STATE = struct.Struct('<190IQQ6IHBBBBBBBBBBB4s6s')
 PING_HISTORY, TIMEOUT = 190, 0xFFFFFFFF
 KEY_QUEUE, IP_SETTINGS = 0x20000054, 0x20000306
 PING_OPEN_SITE, PING_DRAW_SITE = 0x484E, 0x6B04
-PING_PHASES = ['no link', 'no address', 'no gateway', 'ready', 'starting']
+PING_PHASES = ['no link', 'no address', 'no gateway', 'ready', 'starting', 'idle', 'link lost']
+KEY_MATCH = 0x08016180
+PING_VENDOR = 808  # offsetof(ping_state, vendor)
+ITEM = 0x20001100  # scratch RAM for a key item, as the key task holds it on its stack
 # Vendor key items {key, press}: BACK 0, RIGHT 1, LEFT 5, M 4; press 3 short, 6 held.
 BACK, RIGHT, LEFT, M = 0, 1, 5, 4
 SHORT, HELD = 3, 6
@@ -808,8 +840,8 @@ def read_ping(uc):
     ring = [rtts[(head + PING_HISTORY - count + i) % PING_HISTORY] for i in range(count)]
     return {'ring': ring, 'sum_us': rest[0], 'change_sum_us': rest[1], 'sent': rest[2], 'received': rest[3],
             'min_us': rest[4], 'max_us': rest[5], 'changes': rest[6], 'seq': rest[8],
-            'phase': PING_PHASES[rest[11]] if rest[11] < 5 else rest[11], 'target': rest[12], 'running': rest[13],
-            'request': rest[14], 'vendor': rest[15], 'target_ip': rest[19]}
+            'phase': PING_PHASES[rest[11]] if rest[11] < len(PING_PHASES) else rest[11], 'target': rest[12],
+            'running': rest[13], 'request': rest[14], 'vendor': rest[15], 'target_ip': rest[20]}
 
 
 def wave(n):
@@ -817,20 +849,28 @@ def wave(n):
     return [18_000 - (i % 24) * 3000 if i % 24 < 4 else 3_200 + (i * 7919) % 1700 for i in range(n)]
 
 
-SETUP_S = 0.1  # link, DHCP and ARP in the model take a few milliseconds
 PING_SCENARIOS = {
-    # name -> (network model settings, checks)
+    # name -> (network model settings, checks). Every run starts with M; nothing pings before it.
     'ping-gateway': (dict(ping_rtts=[None if i in (20, 47, 75, 101, 118) else r for i, r in enumerate(wave(150))],
-                          keys=[(150.5e6, BACK, SHORT)]),
+                          keys=[(0, M, SHORT), (150.5e6, BACK, SHORT)]),
                      dict(sent=150, lost=5, target=GATEWAY, state=2)),
+    'ping-waits-for-m': (dict(keys=[(2e6, BACK, SHORT)]),
+                         dict(sent=0, lost=0, phase='idle', state=2, drawn=['Press M to start', 'M start'])),
+    'ping-stop-then-target': (dict(ping_rtts=[500] * 5, keys=[(0, M, SHORT), (3.5e6, M, SHORT), (4e6, RIGHT, SHORT),
+                                                               (5e6, BACK, SHORT)]),
+                              dict(sent=0, lost=0, phase='idle', target_index=1, state=2, running=0, echoes=4,
+                                   drawn=['To 1.1.1.1', 'Press M to start'])),
     'ping-change-target': (dict(ping_rtts=[500] * 10 + [12_000] * 6,
-                                keys=[(5.5e6, RIGHT, SHORT), (11.5e6, M, SHORT), (16.5e6, BACK, SHORT)]),
-                           dict(sent=5, lost=0, target=CLOUDFLARE, state=2,
-                                targets=[GATEWAY] * 6 + [CLOUDFLARE] * 12)),
-    'ping-left-skips-unset-saved': (dict(ping_rtts=[12_000] * 4, keys=[(1.5e6, LEFT, SHORT), (4.5e6, BACK, SHORT)]),
+                                keys=[(0, M, SHORT), (5.5e6, RIGHT, SHORT), (11.5e6, BACK, SHORT)]),
+                           dict(sent=6, lost=0, target=CLOUDFLARE, state=2, targets=[GATEWAY] * 6 + [CLOUDFLARE] * 7)),
+    'ping-left-skips-unset-saved': (dict(ping_rtts=[12_000] * 4, keys=[(0, M, SHORT), (1.5e6, LEFT, SHORT),
+                                                                       (4.5e6, BACK, SHORT)]),
                                     dict(sent=3, lost=0, target=GOOGLE, state=2)),
-    'ping-no-link': (dict(link=False), dict(sent=0, lost=0, phase='no link', state=11)),
-    'ping-vendor-screen': (dict(ping_rtts=[500] * 3, keys=[(2.5e6, M, HELD)]),
+    'ping-no-link': (dict(link=False, keys=[(0, M, SHORT), (5e6, BACK, SHORT)]),
+                     dict(sent=0, lost=0, phase='no link', state=2, drawn=['No link'])),
+    'ping-link-lost': (dict(ping_rtts=[600] * 20, link_down_at=4.5e6, keys=[(0, M, SHORT), (8e6, BACK, SHORT)]),
+                       dict(sent=5, lost=0, phase='link lost', state=2, drawn=['NO LINK', 'M start'])),
+    'ping-vendor-screen': (dict(ping_rtts=[500] * 3, keys=[(0, M, SHORT), (2.5e6, M, HELD)]),
                            dict(sent=3, lost=0, target=GATEWAY, state=11, vendor=1)),
 }
 
@@ -850,6 +890,20 @@ def run_ping_scenario(image, sram, symbols, entries, settings, checks, out, name
     problems = []
     try:
         tester.call(open_)
+        if net.echo_targets:
+            problems.append('pinged before M')
+        tester.call(frame)
+        tester.call(draw)
+        # The key task: each key not taken by a run's own polling goes through the vendor key table. Each
+        # screen is drawn when a key changes it, so what was shown can be checked.
+        while net.keys:
+            net.us = max(net.us, int(net.keys[0][0]))
+            item = net.key()
+            if item:
+                tester.uc.mem_write(ITEM, item + bytes(2))
+                tester.call(KEY_MATCH, ITEM)
+                if tester.uc.mem_read(SYS_STATE, 1)[0] == 11:
+                    tester.call(draw)
     except SystemExit as error:
         problems.append(f'run: {error}')
     state = read_ping(tester.uc)
@@ -862,9 +916,16 @@ def run_ping_scenario(image, sram, symbols, entries, settings, checks, out, name
     problems += list(net.errors)
     if final_state != checks['state']:
         problems.append(f'ended in state {final_state}, expected {checks["state"]}')
-    busy = tester.uc.mem_read(NET_BUSY, 1)[0]
-    if busy != (checks['state'] == 11 and not checks.get('vendor')):
-        problems.append(f'network busy flag {busy} in state {final_state}')
+    if tester.uc.mem_read(NET_BUSY, 1)[0]:
+        problems.append('network busy flag set: the key scan would drop every key')
+    if net.keys_dropped:
+        problems.append(f'{net.keys_dropped} key presses dropped')
+    if 'running' in checks and state['running'] != checks['running']:
+        problems.append(f'running {state["running"]}')
+    if 'target_index' in checks and state['target'] != checks['target_index']:
+        problems.append(f'target index {state["target"]}')
+    if state['sent'] and net.idle_resets < state['sent']:
+        problems.append(f'Auto Off idle count cleared {net.idle_resets} times in {state["sent"]} pings')
     if state['sent'] != checks['sent'] or state['sent'] - state['received'] != checks['lost']:
         problems.append(f'{state["sent"]} sent, {state["sent"] - state["received"]} lost; expected '
                         f'{checks["sent"]} and {checks["lost"]}')
@@ -874,7 +935,9 @@ def run_ping_scenario(image, sram, symbols, entries, settings, checks, out, name
         problems.append(f'target {state["target_ip"].hex()}')
     if checks.get('vendor') and not state['vendor']:
         problems.append('the vendor PING screen was not opened')
-    if 'targets' in checks and net.echo_targets != checks['targets']:
+    if 'echoes' in checks and len(net.echo_targets) != checks['echoes']:
+        problems.append(f'{len(net.echo_targets)} echoes, expected {checks["echoes"]}: M did not stop the run')
+    if 'targets' in checks and net.echo_targets[:len(checks['targets'])] != checks['targets']:
         problems.append(f'echo targets {[t.hex() for t in net.echo_targets]}')
     if bytes(tester.uc.mem_read(CUST_INFO[0], CUST_INFO[1])) != before:
         problems.append('Cust_Info changed')
@@ -904,6 +967,23 @@ def run_ping_scenario(image, sram, symbols, entries, settings, checks, out, name
         if text not in drawn:
             problems.append(f'"{text}" not drawn')
     return problems, net.us / 1e6
+
+
+def check_ping_tick(image, sram, symbols):
+    """The 1 ms tick's vendor PING/SCAN network work (0x08015114(4)): never while Ping monitor has the screen,
+    still for IP SCAN (state 12) and for the vendor PING screen."""
+    tester = LinkTester(image, sram, symbols['text'] & ~1)
+    tester.net = net = Network(tester)
+    work = symbols['lpm_ping_tick_work'] & ~1
+    problems = []
+    for state, vendor, expected in ((11, 0, []), (12, 0, [4]), (11, 1, [4])):
+        net.app_commands.clear()
+        tester.uc.mem_write(SYS_STATE, bytes([state]))
+        tester.uc.mem_write(PING + PING_VENDOR, bytes([vendor]))
+        tester.call(work, 4, 0, 0)
+        if net.app_commands != expected:
+            problems.append(f'state {state}, vendor {vendor}: app commands {net.app_commands}')
+    return problems
 
 
 def read_state(uc):
@@ -1119,6 +1199,11 @@ def main():
         print(f'{name:28} {seconds:6.1f} s  {status}')
         if problems:
             failures.append(name)
+    if not args.only or 'ping-tick' in args.only:
+        problems = check_ping_tick(image, sram, symbols)
+        print(f'{"ping-tick":28} {"ok" if not problems else "FAIL: " + "; ".join(problems)}')
+        if problems:
+            failures.append('ping-tick')
     for name, (settings, expected, fragments) in SWITCH_SCENARIOS.items():
         if args.only and name not in args.only:
             continue

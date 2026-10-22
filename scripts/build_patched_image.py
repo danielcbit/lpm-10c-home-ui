@@ -250,6 +250,7 @@ PING_CALLS = {
     'lpm_ping_back': (0x4890, 0x80137B8),   # key event 7 (BACK) in state 11
     'lpm_ping_key': (0x4984, 0x8014778),    # key events 0x25-0x2A (states 11 and 12); passes IP SCAN through
     'lpm_ping_draw': (0x6B04, 0x801378E),   # GUI message 0x15: bx lr in the vendor
+    'lpm_ping_tick_work': (0x1A3E6, 0x8015114),  # 1 ms tick, states 11 and 12: the vendor PING/SCAN network work
 }
 LINK_STATUS_DATA = [
     # Key table 0x08026264, entry 19 {state mask 0x100, key, press, event 0x0B}: right key held -> M pressed.

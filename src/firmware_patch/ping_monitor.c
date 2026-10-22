@@ -4,24 +4,28 @@
  * latest round trip, loss, a graph of the last 190 round trips, and minimum,
  * average, maximum and variation (the mean change between consecutive replies).
  *
- * On opening it takes a DHCP address and the gateway's MAC, with the first
- * three Link status checks (net.h), then pings until BACK. M starts again, LEFT
- * and RIGHT change the target: the gateway, 1.1.1.1, 8.8.8.8, and the vendor
- * PING tool's saved target when one is set. Holding M opens the vendor PING
- * screen itself, for its static address and target settings. Nothing is saved.
+ * It opens waiting: M starts a run, which takes a DHCP address and the
+ * gateway's MAC with the first three Link status checks (net.h), then pings
+ * until M again, BACK, or the link going down. LEFT and RIGHT choose the target:
+ * the gateway, 1.1.1.1, 8.8.8.8, and the vendor PING tool's saved target when
+ * one is set. Holding M opens the vendor PING screen itself, for its static
+ * address and target settings. Nothing is saved.
  *
  * The pings run in the key task, as the Link status checks do, but never block
  * it: between pings and while waiting for a reply the key queue is polled, and
  * each key goes through the vendor key table as usual (0x08016180), so BACK
  * leaves at once and M, LEFT and RIGHT arrive here as events. The network busy
- * flag stays set while the screen is open, so the 1 ms tick queues none of the
- * vendor PING's network work (0x080233E6).
+ * flag (0x200000A9) is never set here: the vendor key scan (0x0801630E) drops
+ * every key while it is. Instead the 1 ms tick's call that starts the vendor
+ * PING's own network work is filtered (lpm_ping_tick_work). While a run goes,
+ * each ping clears the Auto Off idle count (0x0800FF04), as a key would.
  *
  * The vendor calls redirected here (scripts/build_patched_image.py, PING_CALLS):
  *   0x0800D84E  key task, event 6 (M on home), PING open 0x08013794   -> lpm_ping_open
  *   0x0800D890  key task, event 7 (BACK) in state 11, 0x080137B8      -> lpm_ping_back
  *   0x0800D984  key task, events 0x25-0x2A in states 11 and 12, 0x08014778 -> lpm_ping_key
  *   0x0800FB04  GUI task, message 0x15, 0x0801378E (bx lr)            -> lpm_ping_draw
+ *   0x080233E6  1 ms tick, states 11 and 12, app command 0x08015114(4) -> lpm_ping_tick_work
  * and lpm_tool_frame (link_status.c) draws the frame through lpm_ping_frame.
  *
  * Vendor interface (docs/lpm-10c-bootloader-analysis.md, "Ping monitor"):
@@ -29,6 +33,7 @@
  *   0x08024940      xQueueReceive(queue, item, ticks); 0x08016180 key_match(item)
  *   0x20000306      PING and IP settings: +0x14 the PING target, +0x1E the PING
  *                   screen (0 = its main screen, from which BACK goes home)
+ *   0x0800FF04      clears the Auto Off idle count 0x2000016C, as each key does
  */
 #include <stdint.h>
 
@@ -38,7 +43,6 @@
 #include "net.h"
 
 #define SYS_STATE (*(volatile uint8_t *)0x20000150u)
-#define NET_BUSY (*(volatile uint8_t *)0x200000A9u)
 #define KEY_QUEUE (*(void *volatile *)0x20000054u)
 #define IP_SETTINGS ((volatile uint8_t *)0x20000306u)
 #define SAVED_TARGET 0x14
@@ -53,6 +57,8 @@
 #define vendor_ping_open ((void (*)(void))0x08013795u)
 #define vendor_ping_back ((void (*)(void))0x080137B9u)
 #define vendor_ping_key ((void (*)(int))0x08014779u)
+#define app_command ((void (*)(int, int, int))0x08015115u)
+#define idle_reset ((void (*)(void))0x0800FF05u)
 #define tick ((uint32_t (*)(void))0x08023D39u)
 #define delay ((void (*)(uint32_t))0x080244E5u)
 
@@ -80,8 +86,9 @@
 #define INFO_Y 262
 
 enum { TARGET_GATEWAY, TARGET_CLOUDFLARE, TARGET_GOOGLE, TARGET_SAVED, TARGETS };
-enum { REQUEST_RESTART = 1, REQUEST_TARGET = 2, REQUEST_VENDOR = 4 };
-#define PHASE_STARTING (NET_READY + 1) /* phase: a NET_* result, or this while it is found */
+enum { REQUEST_STOP = 1, REQUEST_TARGET = 2, REQUEST_VENDOR = 4 };
+/* phase: a NET_* result of the last start, or one of these */
+enum { PHASE_STARTING = NET_READY + 1, PHASE_IDLE, PHASE_LINK_LOST };
 
 typedef struct {
     uint32_t rtt_us[HISTORY]; /* a ring, from head; TIMEOUT for no reply */
@@ -98,6 +105,7 @@ typedef struct {
     uint8_t chain;   /* the last ping was answered */
     uint8_t mac_known;
     uint8_t plotted; /* the graph area shows the graph, not a message; the GUI task's own */
+    uint8_t footer;  /* 1 + running, as the footer shows it, 0 = not drawn; the GUI task's own */
     uint8_t target_ip[4], target_mac[6];
 } ping_state;
 
@@ -222,25 +230,23 @@ static int poll_keys(void)
     return SYS_STATE != PING_SYS_STATE || PING->request;
 }
 
-void lpm_ping_run(void)
+/* M from the start screen, or after a stop: an address, then a ping a second
+ * until M, BACK, M held, or the link going down. */
+static void run(ping_state *p)
 {
-    ping_state *p = PING;
     p->running = 1;
-    NET_BUSY = 1;
-    if (p->phase != NET_READY && !(p->request & REQUEST_VENDOR)) {
-        p->request = 0;
-        p->phase = PHASE_STARTING;
-        reset(p);
-        show();
-        p->phase = (uint8_t)lpm_net_prepare();
-        p->mac_known = 0;
-        show();
-    }
-    while (p->phase == NET_READY && SYS_STATE == PING_SYS_STATE && !(p->request & REQUEST_VENDOR)) {
-        if (p->request) {
+    p->request = 0;
+    reset(p);
+    p->phase = PHASE_STARTING;
+    show();
+    p->phase = (uint8_t)lpm_net_prepare(); /* a fresh address each time: the cable may have moved */
+    p->mac_known = 0;
+    show();
+    while (p->phase == NET_READY && SYS_STATE == PING_SYS_STATE && !(p->request & (REQUEST_STOP | REQUEST_VENDOR))) {
+        if (p->request & REQUEST_TARGET) {
             reset(p);
             p->mac_known = 0;
-            p->request = 0;
+            p->request &= (uint8_t)~REQUEST_TARGET;
             show();
         }
         uint32_t start = tick(), rtt_us = 0;
@@ -250,46 +256,49 @@ void lpm_ping_run(void)
         int answered = p->mac_known && lpm_net_echo(p->target_mac, p->target_ip, p->seq, &rtt_us, poll_keys);
         if (poll_keys())
             continue; /* a key came: this ping does not count */
+        if (!answered && !lpm_net_link_up()) {
+            p->phase = PHASE_LINK_LOST;
+            break;
+        }
         record(p, answered ? rtt_us : TIMEOUT);
+        idle_reset(); /* a run is activity: Auto Off waits for it to stop */
         show();
         while (tick() - start < INTERVAL_MS && !poll_keys())
             delay(KEY_POLL_MS);
     }
     p->running = 0;
+    p->request &= (uint8_t)~REQUEST_STOP;
     if (p->request & REQUEST_VENDOR) {
         p->request = 0;
         p->vendor = 1;
-        NET_BUSY = 0;
         vendor_ping_open(); /* state 11 again, now drawn and run by the vendor */
-    } else if (SYS_STATE != PING_SYS_STATE) {
-        NET_BUSY = 0;
+        return;
     }
+    show();
 }
 
-/* M on the Ping monitor item (event 6): enter state 11 and run. */
+/* M on the Ping monitor item (event 6): enter state 11 and wait for M. */
 void lpm_ping_open(void)
 {
     uint8_t *b = (uint8_t *)PING;
     for (unsigned i = 0; i < sizeof(ping_state); i++)
         b[i] = 0;
-    PING->phase = PHASE_STARTING;
+    PING->phase = PHASE_IDLE;
     IP_SETTINGS[PING_SCREEN] = 0; /* as the vendor open: BACK then goes home */
     set_sys_state(PING_SYS_STATE);
-    lpm_ping_run();
 }
 
-/* BACK in state 11 (event 7): home, as the vendor PING main screen does. */
+/* BACK in state 11 (event 7): home, as the vendor PING main screen does. A run
+ * sees the new state and ends. */
 void lpm_ping_back(void)
 {
-    if (!PING->vendor) {
+    if (!PING->vendor)
         IP_SETTINGS[PING_SCREEN] = 0;
-        if (!PING->running)
-            NET_BUSY = 0;
-    }
     vendor_ping_back();
 }
 
-/* The PING and IP SCAN key events 0x25-0x2A. */
+/* The PING and IP SCAN key events 0x25-0x2A. While a run is going this is
+ * reached from its key polling, so it only asks; otherwise it acts. */
 void lpm_ping_key(int event)
 {
     ping_state *p = PING;
@@ -298,20 +307,39 @@ void lpm_ping_key(int event)
         return;
     }
     if (event == EVENT_M) {
-        p->request |= REQUEST_RESTART;
+        if (p->running)
+            p->request |= REQUEST_STOP;
+        else
+            run(p);
     } else if (event == EVENT_LEFT || event == EVENT_RIGHT) {
         int step = event == EVENT_RIGHT ? 1 : TARGETS - 1;
         do
             p->target = (uint8_t)((p->target + step) % TARGETS);
         while (p->target == TARGET_SAVED && !has_saved_target());
-        p->request |= REQUEST_TARGET;
+        if (p->running) {
+            p->request |= REQUEST_TARGET;
+        } else { /* the last run's results were for the old target */
+            reset(p);
+            p->phase = PHASE_IDLE;
+            show();
+        }
     } else if (event == EVENT_M_HELD) {
-        p->request |= REQUEST_VENDOR;
-    } else {
-        return;
+        if (p->running) {
+            p->request |= REQUEST_VENDOR; /* the run ends and opens it */
+            return;
+        }
+        p->vendor = 1;
+        vendor_ping_open(); /* state 11 again, now drawn and run by the vendor */
     }
-    if (!p->running)
-        lpm_ping_run();
+}
+
+/* Replaces the 1 ms tick's 0x08015114(4) in states 11 and 12 (0x080233E6): the
+ * vendor PING and IP SCAN network work. None while Ping monitor has the screen. */
+void lpm_ping_tick_work(int command, int a, int b)
+{
+    if (SYS_STATE == PING_SYS_STATE && !PING->vendor)
+        return;
+    app_command(command, a, b);
 }
 
 /* ---- screen (GUI task) ----------------------------------------------------- */
@@ -408,9 +436,10 @@ static void draw_message(ping_state *p)
         {"The gateway does not answer ARP", "M tries again"},
         {"", ""},
         {"Getting an address", "Link, DHCP and the gateway"},
+        {"Press M to start", "LEFT and RIGHT choose the target"},
     };
     fill(0, PLOT_Y - 6, LPM_SCREEN_W, PLOT_H + 12, LPM_C_BG);
-    centred(PLOT_Y + 28, &font_body, lines[p->phase][0], p->phase == PHASE_STARTING ? LPM_C_FG : LPM_C_FAULT);
+    centred(PLOT_Y + 28, &font_body, lines[p->phase][0], p->phase >= PHASE_STARTING ? LPM_C_FG : LPM_C_FAULT);
     centred(PLOT_Y + 50, &font_small, lines[p->phase][1], LPM_C_DIM);
     p->plotted = 0;
 }
@@ -433,15 +462,17 @@ void lpm_ping_draw(void)
     if (SYS_STATE != PING_SYS_STATE || p->vendor)
         return;
     uint32_t last = p->count ? at(p, p->count - 1) : 0;
-    if (p->count && last == TIMEOUT) {
+    if (p->phase == PHASE_LINK_LOST || (p->count && last == TIMEOUT)) {
         fill(LPM_MARGIN, READING_Y, READING_W, 32, LPM_C_BG);
-        text_field(&font_body, LPM_MARGIN, READING_Y + 10, READING_W, 1, "TIMEOUT", LPM_C_FAULT, LPM_C_BG);
+        text_field(&font_body, LPM_MARGIN, READING_Y + 10, READING_W + 4 + 16, 1,
+                   p->phase == PHASE_LINK_LOST ? "NO LINK" : "TIMEOUT", LPM_C_FAULT, LPM_C_BG);
     } else {
         if (p->count)
             put_rtt(buffer, last);
         else
             put(buffer, "--");
         big_number(LPM_MARGIN, READING_Y, READING_W, buffer, LPM_C_FG, LPM_C_BG);
+        text_field(&font_body, LPM_MARGIN + READING_W, READING_Y + 14, 4 + 16, 1, "ms", LPM_C_DIM, LPM_C_BG);
     }
 
     q = put(put_u(buffer, p->sent - p->received), " of ");
@@ -453,7 +484,8 @@ void lpm_ping_draw(void)
     text_field(&font_small, LOSS_X, READING_Y + 22, LPM_SCREEN_W - LOSS_X - LPM_MARGIN, 0, buffer,
                p->sent != p->received ? LPM_C_FAULT : LPM_C_DIM, LPM_C_BG);
 
-    if (p->phase != NET_READY) {
+    /* The graph once a run has pinged, and after it stops; a message before. */
+    if (p->phase != NET_READY && p->phase != PHASE_LINK_LOST && !(p->phase == PHASE_IDLE && p->count)) {
         draw_message(p);
     } else {
         if (!p->plotted) {
@@ -470,11 +502,16 @@ void lpm_ping_draw(void)
     stat(178, mean(p->change_sum_us, p->changes), p->changes != 0);
 
     q = put(buffer, p->target == TARGET_GATEWAY ? "To gateway " : p->target == TARGET_SAVED ? "To saved " : "To ");
-    if (p->phase == NET_READY || p->target != TARGET_GATEWAY) /* the gateway is known once ready */
-        q = put_ip(q, target_ip(p->target));
+    if (p->target != TARGET_GATEWAY || (p->phase == NET_READY || p->phase == PHASE_LINK_LOST))
+        q = put_ip(q, target_ip(p->target)); /* the gateway is known once a run has started */
     if (p->sent)
         put_u(put(q, "  seq "), p->seq);
     text_field(&font_small, 10, INFO_Y, LPM_SCREEN_W - 20, 0, buffer, LPM_C_DIM, LPM_C_BG);
+
+    if (p->footer != 1 + p->running) {
+        draw_footer(p->running ? "M stop  <> target" : "M start  <> target", "BACK home");
+        p->footer = (uint8_t)(1 + p->running);
+    }
 }
 
 int lpm_ping_frame(void)
@@ -485,14 +522,13 @@ int lpm_ping_frame(void)
     draw_header("Ping monitor", STATUS_X);
     text(&font_small, 10, LPM_CONTENT_Y + 6, "LATEST RTT", LPM_C_DIM, LPM_C_BG);
     text(&font_small, LOSS_X, LPM_CONTENT_Y + 6, "LOSS", LPM_C_DIM, LPM_C_BG);
-    text(&font_body, LPM_MARGIN + READING_W + 4, READING_Y + 14, "ms", LPM_C_DIM, LPM_C_BG);
     text(&font_small, 10, STATS_Y, "MIN ms", LPM_C_DIM, LPM_C_BG);
     text(&font_small, 66, STATS_Y, "AVG ms", LPM_C_DIM, LPM_C_BG);
     text(&font_small, 122, STATS_Y, "MAX ms", LPM_C_DIM, LPM_C_BG);
     text(&font_small, 178, STATS_Y, "VAR ms", LPM_C_DIM, LPM_C_BG);
     text(&font_small, 10, INFO_Y + 14, "VAR: mean change. Hold M: setup", LPM_C_DIM, LPM_C_BG);
-    draw_footer("M restart  <> target", "BACK stop");
     PING->plotted = 0;
+    PING->footer = 0;
     lpm_ping_draw();
     note_mark(2, 1); /* the vendor's arrow at the top-left port, which PING uses */
     vendor_battery();

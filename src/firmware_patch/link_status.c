@@ -1281,6 +1281,11 @@ int lpm_net_prepare(void)
     return NET_READY;
 }
 
+int lpm_net_link_up(void)
+{
+    return (dm9051_read(NSR) & 0x40) != 0;
+}
+
 const uint8_t *lpm_net_ip(void)
 {
     return LINK->ip;

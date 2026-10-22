@@ -17,8 +17,10 @@ whose heading matches the tag.
 - One ping a second with the latest round trip, loss, a graph of the last 190
   round trips, and min, average, max and variation (mean change between
   replies).
+- M starts and stops a run; it stops by itself with NO LINK when the cable is
+  pulled, and Auto Off waits while it runs.
 - Targets: the gateway, 1.1.1.1, 8.8.8.8, or the PING tool's saved target
-  (LEFT/RIGHT); M starts again. Gets its own address by DHCP; nothing is saved.
+  (LEFT/RIGHT). Each run gets its own address by DHCP; nothing is saved.
 
 **Theme for the vendor tools**
 - Every vendor screen uses the home screen's colours and the Terminus font,

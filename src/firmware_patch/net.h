@@ -16,6 +16,8 @@ enum { NET_NO_LINK, NET_NO_ADDRESS, NET_NO_GATEWAY, NET_READY };
 /* Link, a DHCP address (a lease, or an OFFER only) and the gateway's MAC by ARP,
  * as the first three Link status checks: how far it got. */
 int lpm_net_prepare(void);
+/* The DM9051 port has a link. */
+int lpm_net_link_up(void);
 const uint8_t *lpm_net_ip(void);
 const uint8_t *lpm_net_mask(void);
 const uint8_t *lpm_net_gateway(void);
