@@ -83,6 +83,32 @@ void draw_icon(const lpm_icon *icon, int x, int y, uint16_t fg, uint16_t bg)
     }
 }
 
+void big_number(int x, int y, int w, const char *s, uint16_t fg, uint16_t bg)
+{
+    const lpm_font *f = &lpm_font_digits;
+    int stride = (f->width + 7) / 8, top = (f->line_height - f->height) / 2, width = 0;
+    for (const char *c = s; *c; c++)
+        if ((unsigned char)*c - f->first < f->count)
+            width += f->advances[(unsigned char)*c - f->first];
+    int gap = w > width ? w - width : 0;
+    fill(x, y, w, top, bg);
+    fill(x, y + top + f->height, w, f->line_height - top - f->height, bg);
+    if (gap)
+        fill(x, y + top, gap, f->height, bg);
+    for (int row = 0; row < f->height; row++) {
+        lcd_set_cursor((uint16_t)(x + gap), (uint16_t)(y + top + row));
+        lcd_write_start();
+        for (const char *c = s; *c; c++) {
+            unsigned code = (unsigned char)*c - f->first;
+            if (code >= f->count)
+                continue;
+            const uint8_t *line = f->bits + (code * f->height + row) * stride;
+            for (int col = 0; col < f->advances[code]; col++)
+                LCD_DATA = (col < f->width && (line[col >> 3] & (0x80u >> (col & 7)))) ? fg : bg;
+        }
+    }
+}
+
 void draw_header(const char *title, int status_x)
 {
     fill(0, LPM_STATUS_Y, LPM_SCREEN_W, LPM_STATUS_H - 1, LPM_C_BG);

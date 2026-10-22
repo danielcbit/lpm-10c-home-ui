@@ -32,6 +32,9 @@ void text_right(const sub_font *f, int right, int y, const char *s, uint16_t fg,
  * to bg. Each pixel is written once, so a changing value does not flicker. */
 void text_field(const sub_font *f, int x, int y, int w, int right, const char *s, uint16_t fg, uint16_t bg);
 void draw_icon(const lpm_icon *icon, int x, int y, uint16_t fg, uint16_t bg);
+/* A reading in the design's 16x28 numerals (lpm_font_digits: space to ':'), right
+ * aligned in a field w wide and 32 high, the rest of the field cleared to bg. */
+void big_number(int x, int y, int w, const char *s, uint16_t fg, uint16_t bg);
 
 /* The status bar (left of the vendor battery icon), the title and their rules. The
  * status text starts at status_x, so a screen can keep the bar's left end free. */

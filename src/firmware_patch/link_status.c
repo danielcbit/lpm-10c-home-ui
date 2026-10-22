@@ -70,6 +70,7 @@
 #include "fmt.h"
 #include "lpm_data.h"
 #include "lpm_theme.h"
+#include "net.h"
 #include "switch_port.h"
 
 /* The vendor image ends its RAM at 0x20011298 (the initial stack top); nothing
@@ -104,7 +105,6 @@
 #define tick ((uint32_t (*)(void))0x08023D39u)
 #define delay ((void (*)(uint32_t))0x080244E5u)
 
-#define LINK_SYS_STATE 8 /* the vendor QC test */
 #define DRAW_MESSAGE 0x0C
 #define KEY_UP 2 /* events of the home screen's UP and DOWN entries */
 #define KEY_DOWN 3
@@ -514,6 +514,8 @@ static void draw_tabs(void)
 void lpm_link_draw(void)
 {
     link_state *s = LINK;
+    if (SYS_STATE != LINK_SYS_STATE) /* Ping monitor uses the checks below, which post this message */
+        return;
     if (SWITCH->drawn_tab != SWITCH->tab) {
         draw_tabs();
         s->drawn_top = 0xFF; /* no row on screen belongs to this tab */
@@ -539,6 +541,8 @@ void lpm_link_draw(void)
  * redrawn last, as the vendor frame does. */
 void lpm_tool_frame(void)
 {
+    if (SYS_STATE == PING_SYS_STATE && lpm_ping_frame())
+        return;
     if (SYS_STATE != LINK_SYS_STATE) {
         vendor_tool_frame();
         return;
@@ -1041,9 +1045,10 @@ static int is_reply(link_state *s, const uint8_t *target, int kind, unsigned seq
            same(ip + 24, s->link_local, 16) && dhcp6_reply(s, p + 8, end, kind);
 }
 
-/* Up to count requests to target through mac, numbered from seq; 1 with *rtt_us set at the first reply. */
+/* Up to count requests to target through mac, numbered from seq; 1 with *rtt_us set at the first reply.
+ * poll, when given, is called while waiting, and non-zero from it ends the wait with 0 (lpm_net_echo). */
 static int exchange(link_state *s, const uint8_t *mac, const uint8_t *target, int kind, unsigned seq, int count,
-                    uint32_t *rtt_us)
+                    uint32_t *rtt_us, int (*poll)(void))
 {
     int answered = 0;
     DEMCR |= 1u << 24; /* TRCENA, so the cycle counter runs */
@@ -1052,6 +1057,8 @@ static int exchange(link_state *s, const uint8_t *mac, const uint8_t *target, in
         uint32_t sent = DWT_CYCCNT, start = tick();
         send_request(s, mac, target, kind, seq);
         while (!answered && tick() - start < REPLY_WAIT_MS) {
+            if (poll && poll())
+                return 0;
             if (dm9051_read(NSR) & 1) {
                 int n = receive();
                 if (n <= 0 && s->rcr) /* the vendor receive resets the receive control after an error */
@@ -1071,7 +1078,7 @@ static int exchange(link_state *s, const uint8_t *mac, const uint8_t *target, in
 static void check_ping(link_state *s)
 {
     begin(s, 3);
-    finish(s, 3, exchange(s, s->gateway_mac, s->gateway, ECHO, 1, PINGS, &s->rtt_us) ? LPM_STEP_PASS
+    finish(s, 3, exchange(s, s->gateway_mac, s->gateway, ECHO, 1, PINGS, &s->rtt_us, 0) ? LPM_STEP_PASS
                                                                                      : LPM_STEP_FAIL);
 }
 
@@ -1080,7 +1087,7 @@ static void check_internet(link_state *s)
     begin(s, 4);
     for (int i = 0; i < 2 && !s->internet; i++)
         if (exchange(s, s->gateway_mac, internet_hosts[i], ECHO, 1 + PINGS + i * INTERNET_PINGS, INTERNET_PINGS,
-                     &s->internet_rtt_us))
+                     &s->internet_rtt_us, 0))
             s->internet = (uint8_t)(i + 1);
     finish(s, 4, s->internet ? LPM_STEP_PASS : LPM_STEP_FAIL);
 }
@@ -1102,7 +1109,7 @@ static int lookup(link_state *s, const uint8_t *server, unsigned seq)
             return 0;
         copy(mac, FRAME + 22, 6);
     }
-    return exchange(s, mac, server, DNS_QUERY, seq, DNS_TRIES, &s->dns_rtt_us);
+    return exchange(s, mac, server, DNS_QUERY, seq, DNS_TRIES, &s->dns_rtt_us, 0);
 }
 
 static void check_dns(link_state *s)
@@ -1132,7 +1139,7 @@ static void check_router(link_state *s)
     s->link_local[12] = 0xFE;
     copy(s->link_local + 13, OWN_MAC + 3, 3);
     probe_address(s->link_local);
-    exchange(s, 0, 0, SOLICIT_ROUTER, 0, SOLICITATIONS, &unused);
+    exchange(s, 0, 0, SOLICIT_ROUTER, 0, SOLICITATIONS, &unused, 0);
     finish(s, ROW_ROUTER, s->router_lifetime ? LPM_STEP_PASS : known6(s->router) ? LPM_STEP_WARN : LPM_STEP_FAIL);
 }
 
@@ -1159,10 +1166,10 @@ static void check_dhcp6(link_state *s)
     s->xid6[0] = (uint8_t)(xid >> 16);
     s->xid6[1] = (uint8_t)(xid >> 8);
     s->xid6[2] = (uint8_t)xid;
-    exchange(s, 0, 0, SOLICIT_DHCP6, 0, TRIES, &unused);
+    exchange(s, 0, 0, SOLICIT_DHCP6, 0, TRIES, &unused, 0);
     if (s->dhcp6 == DHCP6_ADVERTISED && s->server_id_len) {
         s->xid6[0] ^= 0x80; /* a new transaction */
-        exchange(s, 0, 0, REQUEST_DHCP6, 0, TRIES, &unused);
+        exchange(s, 0, 0, REQUEST_DHCP6, 0, TRIES, &unused, 0);
     }
     if (s->dhcp6 >= DHCP6_ADVERTISED)
         probe_address(s->leased);
@@ -1175,7 +1182,7 @@ static void check_dhcp6(link_state *s)
 static void check_ping6(link_state *s)
 {
     begin(s, ROW_PING6);
-    finish(s, ROW_PING6, exchange(s, s->router_mac, s->router, ECHO6, 1, PINGS, &s->rtt6_us) ? LPM_STEP_PASS
+    finish(s, ROW_PING6, exchange(s, s->router_mac, s->router, ECHO6, 1, PINGS, &s->rtt6_us, 0) ? LPM_STEP_PASS
                                                                                              : LPM_STEP_FAIL);
 }
 
@@ -1184,7 +1191,7 @@ static void check_internet6(link_state *s)
     begin(s, ROW_INTERNET6);
     for (int i = 0; i < 2 && !s->internet6; i++)
         if (exchange(s, s->router_mac, internet6_hosts[i], ECHO6, 1 + PINGS + i * INTERNET_PINGS, INTERNET_PINGS,
-                     &s->internet6_rtt_us))
+                     &s->internet6_rtt_us, 0))
             s->internet6 = (uint8_t)(i + 1);
     finish(s, ROW_INTERNET6, s->internet6 ? LPM_STEP_PASS : LPM_STEP_FAIL);
 }
@@ -1257,4 +1264,53 @@ void lpm_link_open(void)
     lpm_switch_reset();
     set_sys_state(LINK_SYS_STATE);
     lpm_link_run();
+}
+
+/* ---- for Ping monitor (ping_monitor.c, key task) ---------------------------- */
+
+int lpm_net_prepare(void)
+{
+    link_state *s = LINK;
+    clear(s);
+    if (!check_link(s))
+        return NET_NO_LINK;
+    if (!check_address(s))
+        return NET_NO_ADDRESS;
+    if (!check_arp(s))
+        return NET_NO_GATEWAY;
+    return NET_READY;
+}
+
+const uint8_t *lpm_net_ip(void)
+{
+    return LINK->ip;
+}
+
+const uint8_t *lpm_net_mask(void)
+{
+    return LINK->mask;
+}
+
+const uint8_t *lpm_net_gateway(void)
+{
+    return LINK->gateway;
+}
+
+const uint8_t *lpm_net_gateway_mac(void)
+{
+    return LINK->gateway_mac;
+}
+
+int lpm_net_arp(const uint8_t *ip, uint8_t *mac)
+{
+    arp_request(ip, LINK->ip);
+    if (!arp_wait(ip, REPLY_WAIT_MS))
+        return 0;
+    copy(mac, FRAME + 22, 6);
+    return 1;
+}
+
+int lpm_net_echo(const uint8_t *mac, const uint8_t *target, unsigned seq, uint32_t *rtt_us, int (*poll)(void))
+{
+    return exchange(LINK, mac, target, ECHO, seq, 1, rtt_us, poll);
 }

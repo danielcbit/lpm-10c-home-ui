@@ -401,13 +401,28 @@ class PatchedImageTests(unittest.TestCase):
         b = build_patched_image
         image = b.apply_patches(self.vendor, b.patch_list('home-ui'))
         sram = (ROOT / 'tests' / 'fixtures' / 'sram-sanitized.bin').read_bytes()
-        ping = V.TOOLS.index('ping')
+        scan = V.TOOLS.index('ip-scan')  # a vendor tool still: PING is now Ping monitor
         tester = V.VendorTester(image, sram)
-        tester.uc.mem_write(V.MENU_STATE, bytes([2, 4 + ping]))
-        self.assertIsNone(tester.run(V.open_targets(image)[ping], 4 + ping))
+        tester.uc.mem_write(V.MENU_STATE, bytes([2, 4 + scan]))
+        self.assertIsNone(tester.run(V.open_targets(image)[scan], 4 + scan))
         self.assertEqual(tester.drain(), [])
         # The vendor greys are gone: the frame body, inner boxes, label boxes and black background are themed.
         self.assertFalse(set(tester.fb) & {0x2105, 0x31A7, 0x4A69, 0x0000})
+
+    def test_ping_monitor_takes_the_ping_slot(self):
+        try:
+            build_patched_image.find_tool('ld.lld')
+        except SystemExit:
+            self.skipTest('clang or lld not installed')
+        b = build_patched_image
+        patched = b.apply_patches(self.vendor, b.patch_list('home-ui'))
+        for name, (site, vendor_target) in b.PING_CALLS.items():
+            self.assertEqual(self.vendor[site:site + 4], b.thumb_branch(site, vendor_target - b.BASE, link=True), name)
+            self.assertNotEqual(patched[site:site + 4], self.vendor[site:site + 4], name)
+        # The GUI message it draws on did nothing in the vendor firmware: 0x0801378E is bx lr.
+        self.assertEqual(self.vendor[0x801378E - b.BASE:0x801378E - b.BASE + 2], b'\x70\x47')
+        home = (ROOT / 'src' / 'firmware_patch' / 'home_ui.c').read_text()
+        self.assertIn('"Ping monitor"', home)
 
     def test_chinese_pictures_are_removed(self):
         try:

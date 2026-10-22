@@ -55,7 +55,7 @@ VENDOR_FONTS = {  # role -> (flash address, width, rows, baseline row); two byte
 }
 # The sources whose text() calls draw with this font. Others (menu_list.c, vendor_text.c) draw
 # with the vendor routines, so their strings need no glyphs here.
-SCREEN_SOURCES = ('home_ui.c', 'link_status.c', 'switch_port.c', 'draw.c')
+SCREEN_SOURCES = ('home_ui.c', 'link_status.c', 'switch_port.c', 'ping_monitor.c', 'draw.c')
 
 
 def read_font(source, name):

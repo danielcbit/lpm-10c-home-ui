@@ -586,6 +586,47 @@ Each scenario checks the rows and details, the LLDP and EAPOL frames sent, the l
 - The design's DHCP tab (the DISCOVER/OFFER/REQUEST/ACK timeline).
 - CDP is only heard when the switch's 60 s timer falls inside the 32 s window, since CDP has no request.
 
+## Ping monitor (added 2026-10-21; emulator only, not yet on the tester)
+
+A continuous ping with a latency graph, after the design's `output/screens/03-ping.png`, in the slot of the vendor PING tool (menu index 7, system state 11). The code is in `src/firmware_patch/ping_monitor.c`. The vendor PING screen remains available by holding M.
+
+**What it shows:**
+- the latest round trip in the design's large numerals, or TIMEOUT;
+- the loss so far ("6 of 150", "4.0% lost");
+- a graph of the last 190 round trips, one per pixel column, on a 1-2-5 scale that fits the highest one shown, with a red mark at the top for each lost ping;
+- minimum, average, maximum and variation (the mean change between consecutive replies) over the whole run;
+- the target and the sequence number.
+
+**Address and targets.** Opening it takes a DHCP address and the gateway's MAC with the first three Link status checks (`lpm_net_prepare` in `link_status.c`, `net.h`); the result is never saved. LEFT and RIGHT cycle the target: the gateway, 1.1.1.1, 8.8.8.8, and the vendor PING tool's saved target (`0x20000306 + 0x14`) when one is set. A target on our subnet is found by ARP; any other goes through the gateway. M starts again, clearing the statistics.
+
+**One echo a second without blocking keys.** Like the Link status checks, the pings run in the key task, which the vendor feeds from a FreeRTOS queue at `0x20000054` (`xQueueReceive` `0x08024940` with no timeout, then the key matcher `0x08016180`, whose items are `{key, press}`). While it waits for a reply or for the next second, the monitor polls that queue every 10 ms. Each key goes through the vendor key table as usual, so:
+- BACK (event 7) leaves at once;
+- M, LEFT, RIGHT and M held (events `0x29`, `0x27`, `0x28`, `0x2A`) arrive at `lpm_ping_key`, which only sets a request while a run is going;
+- a ping interrupted by a key is not counted.
+
+The round trip is timed with the DWT cycle counter, as in Link status.
+
+**Keeping the vendor PING engine away.** In states 11 and 12 the 1 ms tick (`0x080233C0`) sends the app task network work (`0x08015114(4)`) whenever `0x20000095` and the busy flag `0x200000A9` are clear. The monitor keeps the busy flag set for as long as its screen is open, and clears it on BACK or when it hands over to the vendor screen.
+
+| Site | Was | Now |
+| --- | --- | --- |
+| `0x0800D84E` (event 6, menu index 7) | PING open `0x08013794` | `lpm_ping_open`: clear the state, set the PING screen byte `+0x1E` to 0, `set_sysState(11)`, run |
+| `0x0800D890` (event 7, state 11) | PING back `0x080137B8` | `lpm_ping_back`: clear the busy flag, then the vendor back, which goes home from screen 0 |
+| `0x0800D984` (events `0x25`–`0x2A`) | PING / IP SCAN keys `0x08014778` | `lpm_ping_key`: the monitor's keys; IP SCAN and the vendor PING screen pass through |
+| `0x0800FB04` (GUI message `0x15`) | `0x0801378E` (`bx lr`) | `lpm_ping_draw`: the readings, graph and target |
+| `lpm_tool_frame` (message `0x36`) | | `lpm_ping_frame` in state 11: the labels, footer and port arrow |
+
+**Holding M** opens the vendor PING screen (`0x08013794`) with the busy flag cleared; from then on its keys, frame and drawing are the vendor's, until the monitor is opened again from home. That keeps its static address and target editing (Set IP) reachable.
+
+**RAM.** The state (824 bytes, its layout pinned by a `_Static_assert`) is at `0x20020200`, after Link status's and Switch port's. Statistics use 64-bit sums, divided by a shift-and-subtract routine because the build links no runtime library.
+
+**Offline check:** `preview_link_status.py` has five Ping monitor scenarios, with key presses going through the real vendor key table and dispatcher in the emulator:
+- 150 pings to the gateway with spikes and five losses: the ring, the loss, the minimum, maximum and mean, and the 1 s spacing;
+- RIGHT to 1.1.1.1, then M, then BACK: the echo targets, the restart, and leaving to home with the busy flag clear;
+- LEFT with no saved target: it skips to 8.8.8.8;
+- no link: the message, staying in state 11 with the busy flag set until BACK;
+- M held: the vendor PING screen takes over.
+
 ## Theme (added 2026-10-21; emulator only, not yet on the tester)
 
 The vendor tools now use the home screen's navy theme and Terminus font, while their layouts and logic stay unchanged (`src/firmware_patch/theme.c`).

@@ -244,6 +244,13 @@ LINK_STATUS_CALLS = {
     'lpm_link_draw': (0x6ABE, 0x800BB0C),   # GUI message 0x0C: QC draw
     'lpm_tool_frame': (0x6C20, 0x800EE8C),  # GUI message 0x36: tool frame; passes other states through
 }
+# Ping monitor replaces the vendor PING tool (menu index 7, system state 11); ping_monitor.c says why each.
+PING_CALLS = {
+    'lpm_ping_open': (0x484E, 0x8013794),   # key event 6 (M on home): PING open
+    'lpm_ping_back': (0x4890, 0x80137B8),   # key event 7 (BACK) in state 11
+    'lpm_ping_key': (0x4984, 0x8014778),    # key events 0x25-0x2A (states 11 and 12); passes IP SCAN through
+    'lpm_ping_draw': (0x6B04, 0x801378E),   # GUI message 0x15: bx lr in the vendor
+}
 LINK_STATUS_DATA = [
     # Key table 0x08026264, entry 19 {state mask 0x100, key, press, event 0x0B}: right key held -> M pressed.
     (0x1D300, b'\x01\x08', b'\x04\x03', 'key table entry 19 (state 8, event 0x0B): key 1 held -> key 4 (M) pressed'),
@@ -276,16 +283,23 @@ RESET_WARNING_PICTURE = 0x8D3C
 COMPANY_NAME_PICTURE = (0x8B0C, 0x8BCE)
 
 
+HOME_UI_SOURCES = ('home_ui.c', 'link_status.c', 'switch_port.c', 'ping_monitor.c', 'draw.c', 'cust_info.c',
+                   'vendor_text.c', 'subset_font.c', 'theme.c')
+HOME_UI_KEEP = ('lpm_home_draw', 'lpm_home_key', 'lpm_cust_info_store_if_changed', 'lpm_cust_info_load_english',
+                'lpm_cust_info_defaults_english', 'lpm_reset_warning_title', *LINK_STATUS_CALLS, *PING_CALLS,
+                *THEME_ROUTINES, 'lpm_tool_title')
+
+
+def home_ui_sources():
+    return [ROOT / 'src' / 'firmware_patch' / name for name in HOME_UI_SOURCES] + [ROOT / 'src' / 'lpm_ui' / 'lpm_assets.c']
+
+
 def home_ui():
     """Home screen in the working design, drawn by src/lpm_ui; linked by lld after the vendor payload."""
     ui = ROOT / 'src' / 'lpm_ui'
     patch_dir = ROOT / 'src' / 'firmware_patch'
-    sources = [patch_dir / name for name in ('home_ui.c', 'link_status.c', 'draw.c', 'cust_info.c', 'vendor_text.c',
-                                              'subset_font.c', 'theme.c', 'switch_port.c')]
-    sources.append(ui / 'lpm_assets.c')
-    keep = ('lpm_home_draw', 'lpm_home_key', 'lpm_cust_info_store_if_changed', 'lpm_cust_info_load_english',
-            'lpm_cust_info_defaults_english', 'lpm_reset_warning_title', *LINK_STATUS_CALLS, *THEME_ROUTINES, 'lpm_tool_title')
-    sections, symbols = link_added_code(sources, patch_dir / 'home_ui.ld', includes=[ui, patch_dir], keep=keep)
+    sections, symbols = link_added_code(home_ui_sources(), patch_dir / 'home_ui.ld', includes=[ui, patch_dir],
+                                        keep=HOME_UI_KEEP)
     if symbols['lpm_home_draw'] != PAYLOAD_END + BASE:
         raise ValueError('home_ui.ld must place lpm_home_draw at the old payload end 0x0807244C')
     draw, key = symbols['lpm_home_draw'] - BASE, (symbols['lpm_home_key'] & ~1) - BASE
@@ -325,6 +339,8 @@ def home_ui():
     patches += [redirect_call(site, old, link[name], f'{site + BASE:#010x}: {old:#010x} -> {name}')
                 for name, (site, old) in LINK_STATUS_CALLS.items()]
     patches += LINK_STATUS_DATA
+    patches += [redirect_call(site, old, (symbols[name] & ~1) - BASE, f'{site + BASE:#010x}: {old:#010x} -> {name}')
+                for name, (site, old) in PING_CALLS.items()]
     patches.append(redirect_call(TOOL_TITLE_CALL, 0x8018D48, (symbols['lpm_tool_title'] & ~1) - BASE,
                                  'tool frame title 0x0800F3F8: draw_string -> lpm_tool_title (home list names)'))
     vendor = VENDOR.read_bytes()
