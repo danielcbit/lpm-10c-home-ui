@@ -204,7 +204,7 @@ class Network:
                  dns_answers=(GATEWAY, LOCAL_DNS, CLOUDFLARE), dns_rcode=None, cname=False,
                  ra=True, lifetime=1800, managed=False, autonomous=True, dhcp6=None, echo6=True,
                  internet6=(CLOUDFLARE6, GOOGLE6), slaac_in_use=False, lldp=None, cdp=None, cdp_at_ms=None,
-                 dot1x=False, tagged=(), ping_rtts=None, keys=(), link_down_at=None):
+                 dot1x=False, tagged=(), ping_rtts=None, keys=(), link_down_at=None, routed=()):
         self.t, self.uc = tester, tester.uc
         self.link, self.ten, self.full, self.offer, self.ack = link, ten, full, offer, ack
         self.gateway, self.arp, self.echo, self.arp_first = gateway, arp, echo, arp_first
@@ -235,6 +235,7 @@ class Network:
         self.ping_rtts, self.keys = list(ping_rtts) if ping_rtts is not None else None, list(keys)
         self.echo_times = []
         self.link_down_at = link_down_at  # the cable is pulled at this time (us)
+        self.routed = (CLOUDFLARE, GOOGLE, *routed)  # addresses beyond the gateway that answer echoes
         self.keys_dropped = 0
         self.idle_resets = 0
         self.app_commands = []
@@ -378,8 +379,7 @@ class Network:
         if f[0:6] != GATEWAY_MAC or f[6:12] != self.own_mac() or f[12:14] != b'\x08\x00':
             self.errors.append('echo request has the wrong Ethernet header')
         target = ip[16:20]
-        if checksum(ip) != 0xFFFF or ip[9] != 1 or ip[12:16] != OUR_IP or target not in (self.gateway, CLOUDFLARE,
-                                                                                              GOOGLE):
+        if checksum(ip) != 0xFFFF or ip[9] != 1 or ip[12:16] != OUR_IP or target not in (self.gateway, *self.routed):
             self.errors.append(f'bad IPv4 header {ip.hex()}')
         total = struct.unpack('>H', ip[2:4])[0]
         icmp = f[34:14 + total]
@@ -820,16 +820,15 @@ def run_switch_scenario(image, sram, symbols, entries, settings, expected, fragm
 # ---- Ping monitor ------------------------------------------------------------------------------------------
 
 PING = 0x20020200  # ping_state in ping_monitor.c (its _Static_assert pins the layout)
-PING_STATE = struct.Struct('<190IQQ6IHBBBBBBBBBBB4s6s')
+PING_STATE = struct.Struct('<190IQQ6IHBBBBBBBBBBB4s6sBB4s')
 PING_HISTORY, TIMEOUT = 190, 0xFFFFFFFF
 KEY_QUEUE, IP_SETTINGS = 0x20000054, 0x20000306
 PING_OPEN_SITE, PING_DRAW_SITE = 0x484E, 0x6B04
 PING_PHASES = ['no link', 'no address', 'no gateway', 'ready', 'starting', 'idle', 'link lost']
 KEY_MATCH = 0x08016180
-PING_VENDOR = 808  # offsetof(ping_state, vendor)
 ITEM = 0x20001100  # scratch RAM for a key item, as the key task holds it on its stack
-# Vendor key items {key, press}: BACK 0, RIGHT 1, LEFT 5, M 4; press 3 short, 6 held.
-BACK, RIGHT, LEFT, M = 0, 1, 5, 4
+# Vendor key items {key, press}: BACK 0, RIGHT 1, DOWN 2, UP 3, M 4, LEFT 5; press 3 short, 6 held.
+BACK, RIGHT, DOWN, UP, M, LEFT = 0, 1, 2, 3, 4, 5
 SHORT, HELD = 3, 6
 
 
@@ -841,7 +840,8 @@ def read_ping(uc):
     return {'ring': ring, 'sum_us': rest[0], 'change_sum_us': rest[1], 'sent': rest[2], 'received': rest[3],
             'min_us': rest[4], 'max_us': rest[5], 'changes': rest[6], 'seq': rest[8],
             'phase': PING_PHASES[rest[11]] if rest[11] < len(PING_PHASES) else rest[11], 'target': rest[12],
-            'running': rest[13], 'request': rest[14], 'vendor': rest[15], 'target_ip': rest[20]}
+            'running': rest[13], 'request': rest[14], 'editing': rest[15], 'target_ip': rest[20],
+            'cursor': rest[22], 'edit_ip': rest[24]}
 
 
 def wave(n):
@@ -870,8 +870,23 @@ PING_SCENARIOS = {
                      dict(sent=0, lost=0, phase='no link', state=2, drawn=['No link'])),
     'ping-link-lost': (dict(ping_rtts=[600] * 20, link_down_at=4.5e6, keys=[(0, M, SHORT), (8e6, BACK, SHORT)]),
                        dict(sent=5, lost=0, phase='link lost', state=2, drawn=['NO LINK', 'M start'])),
-    'ping-vendor-screen': (dict(ping_rtts=[500] * 3, keys=[(0, M, SHORT), (2.5e6, M, HELD)]),
-                           dict(sent=3, lost=0, target=GATEWAY, state=11, vendor=1)),
+    # Hold M during a run: it stops and the editor opens on the target, 1.1.1.1. LEFT wraps to the last
+    # digit, UP makes it 1.1.1.2, M uses it; M then pings it.
+    'ping-set-address': (dict(ping_rtts=[500] * 10, routed=[bytes([1, 1, 1, 2])], keys=[(0, RIGHT, SHORT), (0.5e6, M, SHORT), (2e6, M, HELD),
+                                                          (3e6, LEFT, SHORT), (3.5e6, UP, SHORT), (4e6, M, SHORT),
+                                                          (4.5e6, M, SHORT), (7.3e6, BACK, SHORT)]),
+                         dict(sent=3, lost=0, target=bytes([1, 1, 1, 2]), saved=bytes([1, 1, 1, 2]), state=2,
+                              editing=0, drawn=['To 1.1.1.2'])),
+    # The editor itself, left open: 192.168.1.1 with the cursor moved to the third octet, which DOWN
+    # takes from 1 to 0 and on to 9 (a hundreds digit wraps at 2: 255 at most).
+    'ping-address-editor': (dict(keys=[(0, M, SHORT), (2.5e6, M, HELD), (3e6, LEFT, SHORT), (3.2e6, LEFT, SHORT),
+                                       (3.4e6, LEFT, SHORT), (3.6e6, LEFT, SHORT), (3.8e6, DOWN, SHORT),
+                                       (4e6, DOWN, SHORT)], ping_rtts=[500] * 3),
+                            dict(sent=3, lost=0, state=11, editing=1, cursor=8, edit_ip=bytes([192, 168, 9, 1]),
+                                 saved=bytes(4), drawn=['TARGET ADDRESS', 'M ok  BACK cancel'])),
+    # BACK leaves the editor without changing the target, then goes home.
+    'ping-address-cancel': (dict(keys=[(0, M, HELD), (0.5e6, UP, SHORT), (1e6, BACK, SHORT), (1.5e6, BACK, SHORT)]),
+                            dict(sent=0, lost=0, state=2, editing=0, saved=bytes(4), target_index=0)),
 }
 
 
@@ -933,8 +948,12 @@ def run_ping_scenario(image, sram, symbols, entries, settings, checks, out, name
         problems.append(f'phase {state["phase"]}')
     if 'target' in checks and state['target_ip'] != checks['target']:
         problems.append(f'target {state["target_ip"].hex()}')
-    if checks.get('vendor') and not state['vendor']:
-        problems.append('the vendor PING screen was not opened')
+    for field in ('editing', 'cursor', 'edit_ip'):
+        if field in checks and state[field] != checks[field]:
+            problems.append(f'{field} {state[field]!r}')
+    saved = bytes(tester.uc.mem_read(IP_SETTINGS + 0x14, 4))
+    if 'saved' in checks and saved != checks['saved']:
+        problems.append(f'saved target {saved.hex()}')
     if 'echoes' in checks and len(net.echo_targets) != checks['echoes']:
         problems.append(f'{len(net.echo_targets)} echoes, expected {checks["echoes"]}: M did not stop the run')
     if 'targets' in checks and net.echo_targets[:len(checks['targets'])] != checks['targets']:
@@ -970,19 +989,18 @@ def run_ping_scenario(image, sram, symbols, entries, settings, checks, out, name
 
 
 def check_ping_tick(image, sram, symbols):
-    """The 1 ms tick's vendor PING/SCAN network work (0x08015114(4)): never while Ping monitor has the screen,
-    still for IP SCAN (state 12) and for the vendor PING screen."""
+    """The 1 ms tick's vendor PING/SCAN network work (0x08015114(4)): never in Ping monitor (state 11),
+    still for IP SCAN (state 12)."""
     tester = LinkTester(image, sram, symbols['text'] & ~1)
     tester.net = net = Network(tester)
     work = symbols['lpm_ping_tick_work'] & ~1
     problems = []
-    for state, vendor, expected in ((11, 0, []), (12, 0, [4]), (11, 1, [4])):
+    for state, expected in ((11, []), (12, [4])):
         net.app_commands.clear()
         tester.uc.mem_write(SYS_STATE, bytes([state]))
-        tester.uc.mem_write(PING + PING_VENDOR, bytes([vendor]))
         tester.call(work, 4, 0, 0)
         if net.app_commands != expected:
-            problems.append(f'state {state}, vendor {vendor}: app commands {net.app_commands}')
+            problems.append(f'state {state}: app commands {net.app_commands}')
     return problems
 
 

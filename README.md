@@ -86,12 +86,13 @@ Press M to listen for what the switch says about its port, for up to 32 s:
 The tester announces itself as an LLDP-MED endpoint first, so LLDP-MED
 switches answer at once instead of at their next 30 s interval.
 
-**Ping monitor** (unreleased; replaces the vendor PING screen, which holding
-M still opens). Press M to start and M to stop: one ping a second to the
-gateway, 1.1.1.1, 8.8.8.8 or the PING tool's saved target (LEFT/RIGHT), with
-the latest round trip, loss, a graph of the last 190 round trips, and min,
-average, max and variation. Each run gets its own address by DHCP; it stops
-with NO LINK if the cable is pulled, and keeps the tester on while it runs.
+**Ping monitor** (unreleased; replaces the vendor PING screen). Press M to
+start and M to stop: one ping a second to the gateway, 1.1.1.1, 8.8.8.8 or an
+address of your own (LEFT/RIGHT), with the latest round trip, loss, a graph of
+the last 190 round trips, and min, average, max and variation. Hold M to type
+the address: UP/DOWN change a digit, LEFT/RIGHT move, M uses it and BACK
+cancels. Each run gets its own address by DHCP; it stops with NO LINK if the
+cable is pulled, and keeps the tester on while it runs.
 
 **Theme for the vendor tools** (unreleased). Every vendor screen now uses the
 home screen's colours and Terminus font. Tool titles use the home list names.
@@ -122,9 +123,9 @@ simulated network. The display and fonts are the tester's own, pixel for pixel.
 | --- | --- | --- |
 | ![IPv6 end of the list](docs/images/link-status-ipv6.png) | ![DHCPv6 address leased](docs/images/link-status-dhcpv6.png) | ![Internet ping and DNS failing](docs/images/link-status-no-internet.png) |
 
-| Ping monitor | Switch port: LLDP | Switch port: end | Cable map, themed |
-| --- | --- | --- | --- |
-| ![Latency graph with spikes and losses](docs/images/ping-monitor.png) | ![Switch name, port and VLANs from LLDP](docs/images/switch-port.png) | ![Management address, PoE and 802.1X](docs/images/switch-port-end.png) | ![The vendor cable map in the theme](docs/images/cable-map-themed.png) |
+| Ping monitor | Ping target address | Switch port: LLDP | Switch port: end | Cable map, themed |
+| --- | --- | --- | --- | --- |
+| ![Latency graph with spikes and losses](docs/images/ping-monitor.png) | ![Typing the address to ping](docs/images/ping-address.png) | ![Switch name, port and VLANs from LLDP](docs/images/switch-port.png) | ![Management address, PoE and 802.1X](docs/images/switch-port-end.png) | ![The vendor cable map in the theme](docs/images/cable-map-themed.png) |
 
 The green arrow in the top-left corner of the Link status screens points to the
 port to use.

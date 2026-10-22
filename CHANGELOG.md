@@ -13,14 +13,15 @@ whose heading matches the tag.
 - Sends an LLDP-MED announcement first, so LLDP-MED switches answer at once.
 - Sends EAPOL-Start and reports whether the port requires 802.1X.
 
-**Ping monitor** (replaces the vendor PING screen; hold M for the old one)
+**Ping monitor** (replaces the vendor PING screen)
 - One ping a second with the latest round trip, loss, a graph of the last 190
   round trips, and min, average, max and variation (mean change between
   replies).
 - M starts and stops a run; it stops by itself with NO LINK when the cable is
   pulled, and Auto Off waits while it runs.
-- Targets: the gateway, 1.1.1.1, 8.8.8.8, or the PING tool's saved target
-  (LEFT/RIGHT). Each run gets its own address by DHCP; nothing is saved.
+- Targets: the gateway, 1.1.1.1, 8.8.8.8, or an address typed in its own
+  editor (hold M; kept until power off, never written to flash), chosen with
+  LEFT/RIGHT. Each run gets its own address by DHCP.
 
 **Theme for the vendor tools**
 - Every vendor screen uses the home screen's colours and the Terminus font,

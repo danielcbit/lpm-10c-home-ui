@@ -8,8 +8,9 @@
  * gateway's MAC with the first three Link status checks (net.h), then pings
  * until M again, BACK, or the link going down. LEFT and RIGHT choose the target:
  * the gateway, 1.1.1.1, 8.8.8.8, and the vendor PING tool's saved target when
- * one is set. Holding M opens the vendor PING screen itself, for its static
- * address and target settings. Nothing is saved.
+ * one is set. Holding M opens an address editor for that saved target, the
+ * vendor PING tool's own (0x20000306 + 0x14): M pings the address typed, BACK
+ * keeps the old one. It is kept in RAM, as the vendor keeps it, until power off.
  *
  * The pings run in the key task, as the Link status checks do, but never block
  * it: between pings and while waiting for a reply the key queue is polled, and
@@ -24,6 +25,7 @@
  *   0x0800D84E  key task, event 6 (M on home), PING open 0x08013794   -> lpm_ping_open
  *   0x0800D890  key task, event 7 (BACK) in state 11, 0x080137B8      -> lpm_ping_back
  *   0x0800D984  key task, events 0x25-0x2A in states 11 and 12, 0x08014778 -> lpm_ping_key
+ *               (state 12, IP SCAN, still goes to the vendor)
  *   0x0800FB04  GUI task, message 0x15, 0x0801378E (bx lr)            -> lpm_ping_draw
  *   0x080233E6  1 ms tick, states 11 and 12, app command 0x08015114(4) -> lpm_ping_tick_work
  * and lpm_tool_frame (link_status.c) draws the frame through lpm_ping_frame.
@@ -54,7 +56,6 @@
 #define vendor_battery ((void (*)(void))0x0800EBE9u)
 #define queue_receive ((int (*)(void *, void *, uint32_t))0x08024941u)
 #define key_match ((void (*)(void *))0x08016181u)
-#define vendor_ping_open ((void (*)(void))0x08013795u)
 #define vendor_ping_back ((void (*)(void))0x080137B9u)
 #define vendor_ping_key ((void (*)(int))0x08014779u)
 #define app_command ((void (*)(int, int, int))0x08015115u)
@@ -64,6 +65,7 @@
 
 #define DRAW_MESSAGE 0x15
 #define EVENT_UP 0x25 /* the vendor PING and IP SCAN key events */
+#define EVENT_DOWN 0x26
 #define EVENT_LEFT 0x27
 #define EVENT_RIGHT 0x28
 #define EVENT_M 0x29
@@ -84,9 +86,14 @@
 #define HISTORY (PLOT_W - 2) /* one round trip per pixel column */
 #define STATS_Y 222
 #define INFO_Y 262
+#define EDIT_Y 104
+#define DIGIT_W 17 /* the big digits are 16 wide, 18 apart: 12 of them and 3 dots fit in 228 */
+#define DOT_W 8
+#define DIGITS 12
 
 enum { TARGET_GATEWAY, TARGET_CLOUDFLARE, TARGET_GOOGLE, TARGET_SAVED, TARGETS };
-enum { REQUEST_STOP = 1, REQUEST_TARGET = 2, REQUEST_VENDOR = 4 };
+enum { REQUEST_STOP = 1, REQUEST_TARGET = 2, REQUEST_EDIT = 4 };
+enum { LAYOUT_NONE, LAYOUT_MONITOR, LAYOUT_EDITOR }; /* what the body shows */
 /* phase: a NET_* result of the last start, or one of these */
 enum { PHASE_STARTING = NET_READY + 1, PHASE_IDLE, PHASE_LINK_LOST };
 
@@ -101,19 +108,22 @@ typedef struct {
     uint8_t target;
     uint8_t running; /* in lpm_ping_run, so a key only asks */
     uint8_t request; /* REQUEST_*, from a key */
-    uint8_t vendor;  /* the vendor PING screen is in use */
+    uint8_t editing; /* the address editor is open */
     uint8_t chain;   /* the last ping was answered */
     uint8_t mac_known;
     uint8_t plotted; /* the graph area shows the graph, not a message; the GUI task's own */
-    uint8_t footer;  /* 1 + running, as the footer shows it, 0 = not drawn; the GUI task's own */
+    uint8_t footer;  /* 1 + running, or 3 for the editor, as the footer shows it, 0 = not drawn; the GUI task's own */
     uint8_t target_ip[4], target_mac[6];
+    uint8_t cursor;     /* the digit edited, 0-11 from the left */
+    uint8_t layout;     /* LAYOUT_*, as the body shows it; the GUI task's own */
+    uint8_t edit_ip[4]; /* the address in the editor */
 } ping_state;
 
 /* Above link_state and switch_state, in the RAM the vendor never uses. */
 #define PING ((ping_state *)0x20020200u)
 
 /* scripts/preview_link_status.py reads this layout. */
-_Static_assert(sizeof(ping_state) == 824 && __builtin_offsetof(ping_state, seq) == 800,
+_Static_assert(sizeof(ping_state) == 832 && __builtin_offsetof(ping_state, seq) == 800,
                "the layout the emulator reads");
 
 static const uint8_t cloudflare[4] = {1, 1, 1, 1}, google[4] = {8, 8, 8, 8};
@@ -213,7 +223,7 @@ static int resolve(ping_state *p)
     return 1;
 }
 
-/* ---- the run (key task) ---------------------------------------------------- */
+/* ---- the key task ---------------------------------------------------------- */
 
 static void show(void)
 {
@@ -230,6 +240,57 @@ static int poll_keys(void)
     return SYS_STATE != PING_SYS_STATE || PING->request;
 }
 
+/* ---- the address editor (key task) ----------------------------------------- */
+
+static void open_editor(ping_state *p)
+{
+    const uint8_t *ip = target_ip(p->target);
+    if (!(ip[0] | ip[1] | ip[2] | ip[3])) /* the gateway, before any run */
+        ip = saved_target();
+    copy(p->edit_ip, ip, 4);
+    p->cursor = 0;
+    p->editing = 1;
+    show();
+}
+
+/* UP or DOWN on the digit under the cursor; a value above 255 becomes 255. */
+static void step_digit(ping_state *p, int up)
+{
+    unsigned octet = p->cursor / 3, place = p->cursor % 3 == 0 ? 100 : p->cursor % 3 == 1 ? 10 : 1;
+    unsigned value = p->edit_ip[octet], digit = value / place % 10, top = place == 100 ? 2 : 9;
+    digit = up ? (digit == top ? 0 : digit + 1) : (digit == 0 ? top : digit - 1);
+    value = value - value / place % 10 * place + digit * place;
+    p->edit_ip[octet] = (uint8_t)(value > 255 ? 255 : value);
+}
+
+/* M in the editor: the address becomes the saved target, and the one pinged
+ * next. 0.0.0.0 clears it, which leaves the gateway. */
+static void use_address(ping_state *p)
+{
+    for (int i = 0; i < 4; i++)
+        IP_SETTINGS[SAVED_TARGET + i] = p->edit_ip[i];
+    p->editing = 0;
+    p->target = has_saved_target() ? TARGET_SAVED : TARGET_GATEWAY;
+    reset(p);
+    p->phase = PHASE_IDLE;
+    show();
+}
+
+static void editor_key(ping_state *p, int event)
+{
+    if (event == EVENT_UP || event == EVENT_DOWN)
+        step_digit(p, event == EVENT_UP);
+    else if (event == EVENT_LEFT)
+        p->cursor = (uint8_t)((p->cursor + DIGITS - 1) % DIGITS);
+    else if (event == EVENT_RIGHT)
+        p->cursor = (uint8_t)((p->cursor + 1) % DIGITS);
+    else if (event == EVENT_M || event == EVENT_M_HELD)
+        return use_address(p);
+    show();
+}
+
+/* ---- the run (key task) ------------------------------------------------------ */
+
 /* M from the start screen, or after a stop: an address, then a ping a second
  * until M, BACK, M held, or the link going down. */
 static void run(ping_state *p)
@@ -242,7 +303,7 @@ static void run(ping_state *p)
     p->phase = (uint8_t)lpm_net_prepare(); /* a fresh address each time: the cable may have moved */
     p->mac_known = 0;
     show();
-    while (p->phase == NET_READY && SYS_STATE == PING_SYS_STATE && !(p->request & (REQUEST_STOP | REQUEST_VENDOR))) {
+    while (p->phase == NET_READY && SYS_STATE == PING_SYS_STATE && !(p->request & (REQUEST_STOP | REQUEST_EDIT))) {
         if (p->request & REQUEST_TARGET) {
             reset(p);
             p->mac_known = 0;
@@ -268,10 +329,9 @@ static void run(ping_state *p)
     }
     p->running = 0;
     p->request &= (uint8_t)~REQUEST_STOP;
-    if (p->request & REQUEST_VENDOR) {
+    if (p->request & REQUEST_EDIT) {
         p->request = 0;
-        p->vendor = 1;
-        vendor_ping_open(); /* state 11 again, now drawn and run by the vendor */
+        open_editor(p);
         return;
     }
     show();
@@ -288,12 +348,16 @@ void lpm_ping_open(void)
     set_sys_state(PING_SYS_STATE);
 }
 
-/* BACK in state 11 (event 7): home, as the vendor PING main screen does. A run
- * sees the new state and ends. */
+/* BACK in state 11 (event 7): out of the editor, keeping the old address, or
+ * home, as the vendor PING main screen does. A run sees the new state and ends. */
 void lpm_ping_back(void)
 {
-    if (!PING->vendor)
-        IP_SETTINGS[PING_SCREEN] = 0;
+    if (PING->editing) {
+        PING->editing = 0;
+        show();
+        return;
+    }
+    IP_SETTINGS[PING_SCREEN] = 0;
     vendor_ping_back();
 }
 
@@ -302,11 +366,13 @@ void lpm_ping_back(void)
 void lpm_ping_key(int event)
 {
     ping_state *p = PING;
-    if (SYS_STATE != PING_SYS_STATE || p->vendor) {
+    if (SYS_STATE != PING_SYS_STATE) {
         vendor_ping_key(event);
         return;
     }
-    if (event == EVENT_M) {
+    if (p->editing) {
+        editor_key(p, event);
+    } else if (event == EVENT_M) {
         if (p->running)
             p->request |= REQUEST_STOP;
         else
@@ -324,20 +390,18 @@ void lpm_ping_key(int event)
             show();
         }
     } else if (event == EVENT_M_HELD) {
-        if (p->running) {
-            p->request |= REQUEST_VENDOR; /* the run ends and opens it */
-            return;
-        }
-        p->vendor = 1;
-        vendor_ping_open(); /* state 11 again, now drawn and run by the vendor */
+        if (p->running)
+            p->request |= REQUEST_EDIT; /* the run ends and opens it */
+        else
+            open_editor(p);
     }
 }
 
 /* Replaces the 1 ms tick's 0x08015114(4) in states 11 and 12 (0x080233E6): the
- * vendor PING and IP SCAN network work. None while Ping monitor has the screen. */
+ * vendor PING and IP SCAN network work. Only IP SCAN keeps it. */
 void lpm_ping_tick_work(int command, int a, int b)
 {
-    if (SYS_STATE == PING_SYS_STATE && !PING->vendor)
+    if (SYS_STATE == PING_SYS_STATE)
         return;
     app_command(command, a, b);
 }
@@ -454,13 +518,75 @@ static void stat(int x, uint32_t us, int known)
     text_field(&font_body, x, STATS_Y + 14, 54, 0, buffer, LPM_C_FG, LPM_C_BG);
 }
 
-/* GUI message 0x15: the readings, the graph and the target, after each ping. */
+static void body(ping_state *p, int layout)
+{
+    fill(0, LPM_CONTENT_Y, LPM_SCREEN_W, LPM_FOOTER_Y - LPM_CONTENT_Y, LPM_C_BG);
+    p->layout = (uint8_t)layout;
+    p->plotted = 0;
+}
+
+static void monitor_labels(void)
+{
+    text(&font_small, 10, LPM_CONTENT_Y + 6, "LATEST RTT", LPM_C_DIM, LPM_C_BG);
+    text(&font_small, LOSS_X, LPM_CONTENT_Y + 6, "LOSS", LPM_C_DIM, LPM_C_BG);
+    text(&font_small, 10, STATS_Y, "MIN ms", LPM_C_DIM, LPM_C_BG);
+    text(&font_small, 66, STATS_Y, "AVG ms", LPM_C_DIM, LPM_C_BG);
+    text(&font_small, 122, STATS_Y, "MAX ms", LPM_C_DIM, LPM_C_BG);
+    text(&font_small, 178, STATS_Y, "VAR ms", LPM_C_DIM, LPM_C_BG);
+    text(&font_small, 10, INFO_Y + 14, "VAR: mean change. Hold M: address", LPM_C_DIM, LPM_C_BG);
+}
+
+static void footer(ping_state *p, int shown)
+{
+    static const char *const left[] = {"M start  <> target", "M stop  <> target", "UP/DN  <> move"};
+    if (p->footer != shown) {
+        draw_footer(left[shown - 1], shown == 3 ? "M ok  BACK cancel" : "BACK home");
+        p->footer = (uint8_t)shown;
+    }
+}
+
+/* The editor: the address as twelve big digits, the one under the cursor
+ * on the accent. */
+static void draw_editor(ping_state *p)
+{
+    if (p->layout != LAYOUT_EDITOR) {
+        body(p, LAYOUT_EDITOR);
+        text(&font_small, 10, LPM_CONTENT_Y + 6, "TARGET ADDRESS", LPM_C_DIM, LPM_C_BG);
+        centred(EDIT_Y + 52, &font_small, "UP and DOWN change the digit", LPM_C_DIM);
+        centred(EDIT_Y + 66, &font_small, "LEFT and RIGHT move along", LPM_C_DIM);
+        centred(EDIT_Y + 94, &font_body, "M pings this address", LPM_C_FG);
+        centred(EDIT_Y + 114, &font_small, "BACK keeps the last one", LPM_C_DIM);
+        centred(EDIT_Y + 128, &font_small, "0.0.0.0 clears it", LPM_C_DIM);
+    }
+    int x = (LPM_SCREEN_W - DIGITS * DIGIT_W - 3 * DOT_W) / 2;
+    for (int i = 0; i < DIGITS; i++) {
+        unsigned value = p->edit_ip[i / 3], place = i % 3 == 0 ? 100 : i % 3 == 1 ? 10 : 1;
+        char digit[2] = {(char)('0' + value / place % 10), 0};
+        int on = i == p->cursor;
+        big_number(x, EDIT_Y, DIGIT_W, digit, on ? LPM_C_ON_ACCENT : LPM_C_FG, on ? LPM_C_ACCENT : LPM_C_BG);
+        x += DIGIT_W;
+        if (i % 3 == 2 && i < DIGITS - 1) {
+            big_number(x, EDIT_Y, DOT_W, ".", LPM_C_DIM, LPM_C_BG);
+            x += DOT_W;
+        }
+    }
+    footer(p, 3);
+}
+
+/* GUI message 0x15: the readings, the graph and the target, after each ping;
+ * or the editor. */
 void lpm_ping_draw(void)
 {
     ping_state *p = PING;
     char buffer[48], *q;
-    if (SYS_STATE != PING_SYS_STATE || p->vendor)
+    if (SYS_STATE != PING_SYS_STATE)
         return;
+    if (p->editing)
+        return draw_editor(p);
+    if (p->layout != LAYOUT_MONITOR) {
+        body(p, LAYOUT_MONITOR);
+        monitor_labels();
+    }
     uint32_t last = p->count ? at(p, p->count - 1) : 0;
     if (p->phase == PHASE_LINK_LOST || (p->count && last == TIMEOUT)) {
         fill(LPM_MARGIN, READING_Y, READING_W, 32, LPM_C_BG);
@@ -501,33 +627,19 @@ void lpm_ping_draw(void)
     stat(122, p->max_us, p->received != 0);
     stat(178, mean(p->change_sum_us, p->changes), p->changes != 0);
 
-    q = put(buffer, p->target == TARGET_GATEWAY ? "To gateway " : p->target == TARGET_SAVED ? "To saved " : "To ");
+    q = put(buffer, p->target == TARGET_GATEWAY ? "To gateway " : "To ");
     if (p->target != TARGET_GATEWAY || (p->phase == NET_READY || p->phase == PHASE_LINK_LOST))
         q = put_ip(q, target_ip(p->target)); /* the gateway is known once a run has started */
     if (p->sent)
         put_u(put(q, "  seq "), p->seq);
     text_field(&font_small, 10, INFO_Y, LPM_SCREEN_W - 20, 0, buffer, LPM_C_DIM, LPM_C_BG);
-
-    if (p->footer != 1 + p->running) {
-        draw_footer(p->running ? "M stop  <> target" : "M start  <> target", "BACK home");
-        p->footer = (uint8_t)(1 + p->running);
-    }
+    footer(p, 1 + p->running);
 }
 
 int lpm_ping_frame(void)
 {
-    if (PING->vendor)
-        return 0;
-    fill(0, LPM_CONTENT_Y, LPM_SCREEN_W, LPM_FOOTER_Y - LPM_CONTENT_Y, LPM_C_BG);
     draw_header("Ping monitor", STATUS_X);
-    text(&font_small, 10, LPM_CONTENT_Y + 6, "LATEST RTT", LPM_C_DIM, LPM_C_BG);
-    text(&font_small, LOSS_X, LPM_CONTENT_Y + 6, "LOSS", LPM_C_DIM, LPM_C_BG);
-    text(&font_small, 10, STATS_Y, "MIN ms", LPM_C_DIM, LPM_C_BG);
-    text(&font_small, 66, STATS_Y, "AVG ms", LPM_C_DIM, LPM_C_BG);
-    text(&font_small, 122, STATS_Y, "MAX ms", LPM_C_DIM, LPM_C_BG);
-    text(&font_small, 178, STATS_Y, "VAR ms", LPM_C_DIM, LPM_C_BG);
-    text(&font_small, 10, INFO_Y + 14, "VAR: mean change. Hold M: setup", LPM_C_DIM, LPM_C_BG);
-    PING->plotted = 0;
+    PING->layout = LAYOUT_NONE;
     PING->footer = 0;
     lpm_ping_draw();
     note_mark(2, 1); /* the vendor's arrow at the top-left port, which PING uses */

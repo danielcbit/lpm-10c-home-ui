@@ -588,7 +588,7 @@ Each scenario checks the rows and details, the LLDP and EAPOL frames sent, the l
 
 ## Ping monitor (added 2026-10-21; emulator only, not yet on the tester)
 
-A continuous ping with a latency graph, after the design's `output/screens/03-ping.png`, in the slot of the vendor PING tool (menu index 7, system state 11). The code is in `src/firmware_patch/ping_monitor.c`. The vendor PING screen remains available by holding M.
+A continuous ping with a latency graph, after the design's `output/screens/03-ping.png`, in the slot of the vendor PING tool (menu index 7, system state 11). The code is in `src/firmware_patch/ping_monitor.c`. Holding M opens an editor for the target address; the vendor PING screen is no longer reachable.
 
 **What it shows:**
 - the latest round trip in the design's large numerals, or TIMEOUT;
@@ -608,7 +608,7 @@ The round trip is timed with the DWT cycle counter, as in Link status.
 
 **The busy flag drops keys (found on the tester, 2026-10-22).** The first build kept the network busy flag `0x200000A9` set while the screen was open, and on the tester no key worked: not BACK, not M. Without a cable it sat on the "No link" screen until Auto Off switched it off. The vendor key scan (`0x0801630E`) returns without queueing the key while the flag is set, so the vendor uses it to lock the keys during its blocking network work. Link status sets it only during a run, which reads no keys, so it never showed there. The emulator missed it because it put keys straight into the queue. Its key model now drops presses while the flag is set, and every Ping monitor scenario checks that none was dropped.
 
-**Keeping the vendor PING engine away, without the busy flag.** In states 11 and 12 the 1 ms tick (`0x080233C0`) sends the app task command 4 (`0x08015114(4)` at `0x080233E6`) whenever `0x20000095` and the busy flag are clear. Command 4 is the vendor PING and IP SCAN network work (`0x0801D25C`: it sets `0x20000095` and pings or scans with the settings at `0x20000306`). That call now goes through `lpm_ping_tick_work`, which drops it in state 11 unless the vendor PING screen is in use. The other periodic command, 6 every 2 s, ends in `bx lr` (`0x0801A676`).
+**Keeping the vendor PING engine away, without the busy flag.** In states 11 and 12 the 1 ms tick (`0x080233C0`) sends the app task command 4 (`0x08015114(4)` at `0x080233E6`) whenever `0x20000095` and the busy flag are clear. Command 4 is the vendor PING and IP SCAN network work (`0x0801D25C`: it sets `0x20000095` and pings or scans with the settings at `0x20000306`). That call now goes through `lpm_ping_tick_work`, which drops it in state 11 and passes it on for IP SCAN (state 12). The other periodic command, 6 every 2 s, ends in `bx lr` (`0x0801A676`).
 
 **Auto Off.** `0x0800FEAC` (each second, outside home) counts idle seconds in `0x2000016C` against the Auto Off setting (Cust_Info `+0xA2`). The key matcher clears the count after every key (`0x0800FF04`, called at `0x08016252`). A run clears it after each ping, so a long unattended run is not switched off; once stopped, Auto Off works as usual. (`0x08011C80`, called before each key event, is the key click: it starts the buzzer PWM at `0x4000043C`.)
 
@@ -616,16 +616,16 @@ The round trip is timed with the DWT cycle counter, as in Link status.
 | --- | --- | --- |
 | `0x0800D84E` (event 6, menu index 7) | PING open `0x08013794` | `lpm_ping_open`: clear the state, set the PING screen byte `+0x1E` to 0, `set_sysState(11)`, run |
 | `0x0800D890` (event 7, state 11) | PING back `0x080137B8` | `lpm_ping_back`: the vendor back, which goes home from screen 0; a run sees the state change and ends |
-| `0x0800D984` (events `0x25`–`0x2A`) | PING / IP SCAN keys `0x08014778` | `lpm_ping_key`: the monitor's keys; IP SCAN and the vendor PING screen pass through |
+| `0x0800D984` (events `0x25`–`0x2A`) | PING / IP SCAN keys `0x08014778` | `lpm_ping_key`: the monitor's and the editor's keys; IP SCAN passes through |
 | `0x0800FB04` (GUI message `0x15`) | `0x0801378E` (`bx lr`) | `lpm_ping_draw`: the readings, graph, target and footer |
-| `0x080233E6` (1 ms tick, states 11 and 12) | app command `0x08015114(4)` | `lpm_ping_tick_work`: dropped while Ping monitor has the screen |
+| `0x080233E6` (1 ms tick, states 11 and 12) | app command `0x08015114(4)` | `lpm_ping_tick_work`: dropped in state 11 |
 | `lpm_tool_frame` (message `0x36`) | | `lpm_ping_frame` in state 11: the labels, footer and port arrow |
 
-**Holding M** opens the vendor PING screen (`0x08013794`); from then on its keys, frame, drawing and tick work are the vendor's, until the monitor is opened again from home. That keeps its static address and target editing (Set IP) reachable.
+**The target address editor.** The first build handed over to the vendor PING screen on a held M, for its target setting; on the tester that meant leaving the monitor and its look. Holding M now opens an editor in the monitor itself (stopping a run first): the address as twelve digits, UP/DOWN change the digit under the cursor (a hundreds digit 0–2, an octet at most 255), LEFT/RIGHT move it, M uses the address and BACK keeps the old one. The address goes to the vendor PING target (`0x20000306 + 0x14`). That is RAM outside the Cust_Info record, so it lasts until power off and is never written to flash. It becomes the selected target, and 0.0.0.0 clears it. The editor starts from the target shown, or the saved one before the gateway is known. The vendor's own static address for the tester (Set IP) is no longer reachable; the monitor always takes a DHCP address.
 
-**RAM.** The state (824 bytes, its layout pinned by a `_Static_assert`) is at `0x20020200`, after Link status's and Switch port's. Statistics use 64-bit sums, divided by a shift-and-subtract routine because the build links no runtime library.
+**RAM.** The state (832 bytes, its layout pinned by a `_Static_assert`) is at `0x20020200`, after Link status's and Switch port's. Statistics use 64-bit sums, divided by a shift-and-subtract routine because the build links no runtime library.
 
-**Offline check:** `preview_link_status.py` has eight Ping monitor scenarios. Key presses go through the real vendor key table and dispatcher in the emulator, both from the key task and from a run's own polling, and are lost while the busy flag is set, as on the tester:
+**Offline check:** `preview_link_status.py` has ten Ping monitor scenarios. Key presses go through the real vendor key table and dispatcher in the emulator, both from the key task and from a run's own polling, and are lost while the busy flag is set, as on the tester:
 - opening and BACK without M: nothing is pinged;
 - 150 pings to the gateway with spikes and five losses: the ring, the loss, the minimum, maximum and mean, the 1 s spacing, and the Auto Off count cleared after each ping;
 - M to stop, then RIGHT while stopped: four echoes only, and the old results cleared;
@@ -633,9 +633,11 @@ The round trip is timed with the DWT cycle counter, as in Link status.
 - LEFT with no saved target: it skips to 8.8.8.8;
 - no link: the message, then BACK goes home;
 - the cable pulled during a run: it stops with NO LINK;
-- M held: the vendor PING screen takes over.
+- M held during a run to 1.1.1.1: it stops, LEFT and UP make 1.1.1.2, M uses it, and the next run pings it;
+- the editor left open: four LEFTs and two DOWNs on 192.168.1.1 give 192.168.9.1 (digit wrap), and its screen;
+- BACK in the editor: the saved target is unchanged, and a second BACK goes home.
 
-A separate check calls `lpm_ping_tick_work` in states 11 and 12, with and without the vendor screen.
+A separate check calls `lpm_ping_tick_work` in states 11 and 12.
 
 ## Theme (added 2026-10-21; emulator only, not yet on the tester)
 
