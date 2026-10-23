@@ -101,6 +101,11 @@ tagged with a VLAN you choose (LEFT/RIGHT pick a digit, UP/DOWN change it). It
 shows whether a trunk port carries that VLAN and whether it has DHCP and a
 working gateway. Replies from the untagged native VLAN don't count.
 
+**Duplicate IP** (unreleased, new home item). Takes a DHCP address, then
+checks with three ARP probes (RFC 5227) whether another host already uses it,
+and whether the gateway answers from more than one MAC. Conflicting hosts are
+listed by MAC. Nothing is announced on the network.
+
 **Theme for the vendor tools** (unreleased). Every vendor screen now uses the
 home screen's colours and Terminus font. Tool titles use the home list names.
 Layouts and behaviour are unchanged.
@@ -130,9 +135,9 @@ simulated network. The display and fonts are the tester's own, pixel for pixel.
 | --- | --- | --- |
 | ![IPv6 end of the list](docs/images/link-status-ipv6.png) | ![DHCPv6 address leased](docs/images/link-status-dhcpv6.png) | ![Internet ping and DNS failing](docs/images/link-status-no-internet.png) |
 
-| VLAN test |
-| --- |
-| ![IPv4 checks on VLAN 20](docs/images/vlan-test.png) |
+| VLAN test | Duplicate IP |
+| --- | --- |
+| ![IPv4 checks on VLAN 20](docs/images/vlan-test.png) | ![A second host on our address and two gateway MACs](docs/images/duplicate-ip.png) |
 
 | Ping monitor | Ping target address | Switch port: LLDP | Switch port: end | Cable map, themed |
 | --- | --- | --- | --- | --- |

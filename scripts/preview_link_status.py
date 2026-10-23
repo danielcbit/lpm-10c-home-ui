@@ -206,7 +206,7 @@ class Network:
                  ra=True, lifetime=1800, managed=False, autonomous=True, dhcp6=None, echo6=True,
                  internet6=(CLOUDFLARE6, GOOGLE6), slaac_in_use=False, lldp=None, cdp=None, cdp_at_ms=None,
                  dot1x=False, tagged=(), ping_rtts=None, keys=(), link_down_at=None, routed=(),
-                 trunk=None):
+                 trunk=None, conflict_mac=None, gateway_twin=None):
         self.t, self.uc = tester, tester.uc
         self.link, self.ten, self.full, self.offer, self.ack = link, ten, full, offer, ack
         self.gateway, self.arp, self.echo, self.arp_first = gateway, arp, echo, arp_first
@@ -242,6 +242,9 @@ class Network:
         self.trunk = set(trunk or ())
         self.vlans_sent = []  # the VLAN of each tagged frame we sent
         self.dhcp_vlans = []  # the VLAN (0 untagged) of each DHCP DISCOVER or REQUEST
+        # Duplicate IP: a host that also uses our address, and a second MAC answering for the gateway.
+        self.conflict_mac, self.gateway_twin = conflict_mac, gateway_twin
+        self.arp_probes = []
         self.raw_queue = False  # deliver queued frames as they are, without the trunk's tag
         self.sent_frames = []
         self.keys_dropped = 0
@@ -310,6 +313,9 @@ class Network:
         magic, tagging, tag = struct.unpack('<IIH', self.uc.mem_read(TOOLS, 10))
         return tag if tagging == TAGGING_MAGIC else 0
 
+    def tool(self):
+        return self.uc.mem_read(TOOLS + 13, 1)[0]
+
     def carried(self):
         """Whether frames sent now reach the network: untagged always, tagged only on a trunk VLAN."""
         vlan = self.tagging()
@@ -347,12 +353,27 @@ class Network:
         self.us += timeout * 1000
         return 0
 
+    def arp_reply(self, delay_us, mac, ip):
+        frame = self.own_mac() + mac + b'\x08\x06' + bytes.fromhex('0001080006040002') + mac + ip + self.own_mac() \
+            + OUR_IP
+        self.queue.append((self.us + delay_us, frame + bytes(60 - len(frame))))
+
     def arp_request(self):
         target, sender = bytes(self.uc.mem_read(self.arg(0), 4)), bytes(self.uc.mem_read(self.arg(1), 4))
         self.us += 40
+        if sender == bytes(4):  # an RFC 5227 probe (Duplicate IP)
+            self.arp_probes.append(target)
+            if self.conflict_mac and target == OUR_IP:
+                self.arp_reply(700, self.conflict_mac, OUR_IP)
+            return 0
         if sender != OUR_IP:
             self.errors.append(f'ARP request sent from {sender.hex()}')
         self.asked = target
+        if self.tool() == 2 and self.carried():  # Duplicate IP reads the answers itself
+            if target == self.gateway and self.arp:
+                self.arp_reply(800, GATEWAY_MAC, target)
+                if self.gateway_twin:
+                    self.arp_reply(1200, self.gateway_twin, target)
         return 0
 
     def arp_wait(self):
@@ -1146,10 +1167,14 @@ def check_port_mark(fb):
     return problems
 
 
-# ---- VLAN test (tools.h) --------------------------------------------------------------
+# ---- VLAN test and Duplicate IP (tools.h) ------------------------------------------
 
-TOOL_VLAN = 1
+TOOL_VLAN, TOOL_DUPLICATE = 1, 2
+DUP = 0x20020600  # duplicate_state in duplicate_ip.c
+DUP_STATE = struct.Struct('<4sBBBB24s24s4s4s')
 ACTION_UP, ACTION_DOWN, ACTION_LEFT, ACTION_RIGHT = 2, 3, 4, 5  # lpm_home_key's actions, as lpm_link_key gets them
+
+MAC_SYNOLOGY, MAC_INTRUDER = bytes.fromhex('001132445566'), bytes.fromhex('00deadbeef01')
 VLAN_20 = [ACTION_LEFT, ACTION_UP, ACTION_UP, ACTION_RIGHT, ACTION_DOWN]  # from VLAN 0001: tens to 2, ones to 0
 
 TOOL_SCENARIOS = {
@@ -1158,6 +1183,14 @@ TOOL_SCENARIOS = {
                    dict(steps=['PASS'] * 6, vlan=20, drawn=['VLAN ID', 'tagged'])),
     'vlan-not-carried': (TOOL_VLAN, dict(trunk={30}), VLAN_20,
                          dict(steps=['PASS', 'FAIL'] + ['SKIPPED'] * 4, vlan=20)),
+    'duplicate-free': (TOOL_DUPLICATE, dict(), [],
+                       dict(steps=['PASS', 'PASS', 'PASS', 'PASS'], claimants=0, gateways=1,
+                            drawn=['answers to no other host', '192.168.1.1 at 00:1A:2B:3C:00:01'])),
+    'duplicate-conflict': (TOOL_DUPLICATE, dict(conflict_mac=MAC_INTRUDER, gateway_twin=MAC_SYNOLOGY), [],
+                           dict(steps=['PASS', 'PASS', 'FAIL', 'FAIL'], claimants=1, gateways=2,
+                                drawn=['1 other host: 00:DE:AD:BE:EF:01', '2 MACs'])),
+    'duplicate-no-link': (TOOL_DUPLICATE, dict(link=False), [],
+                          dict(steps=['FAIL', 'SKIPPED', 'SKIPPED', 'SKIPPED'], probes=0)),
 }
 
 
@@ -1173,6 +1206,7 @@ def run_tool_scenario(image, sram, symbols, entries, tool, settings, actions, ch
     # The home list left on the tool (lpm_home_key sets both), VLAN 1 with the ones digit selected.
     tester.uc.mem_write(TOOLS, struct.pack('<IIHHBBBBB', TOOLS_MAGIC, 0, 0, 1, 5 + tool, 0xEE, 3, 0, 0))
     tester.uc.mem_write(MENU_SELECTION, bytes([8]))
+    tester.uc.mem_write(DUP, b'\xa5' * DUP_STATE.size)  # whatever the RAM held: the open must clear it
     tester.net = net = Network(tester, **settings)
     before = {region: bytes(tester.uc.mem_read(*region)) for region in (IP_CONFIG, CUST_INFO)}
     problems = []
@@ -1219,6 +1253,18 @@ def run_tool_scenario(image, sram, symbols, entries, tool, settings, actions, ch
             problems.append(f'frames tagged {sorted(set(net.vlans_sent))}')
         if not net.dhcp_vlans or set(net.dhcp_vlans) != {checks['vlan']}:
             problems.append(f'DHCP on VLANs {net.dhcp_vlans}')
+    else:
+        d = DUP_STATE.unpack(bytes(tester.uc.mem_read(DUP, DUP_STATE.size)))
+        state = read_state(tester.uc)
+        steps = state['steps'][:2] + [STEPS[x] for x in d[0][2:]]
+        if steps != checks['steps']:
+            problems.append(f'steps {steps}')
+        for field, index in (('claimants', 2), ('gateways', 3)):
+            if field in checks and d[index] != checks[field]:
+                problems.append(f'{field} {d[index]}')
+        probes = checks.get('probes', 3 if checks['steps'][1] == 'PASS' else 0)
+        if net.arp_probes != [OUR_IP] * probes:
+            problems.append(f'probes {[p.hex() for p in net.arp_probes]}')
     drawn = ' | '.join(tester.drawn)
     problems += [f'"{text}" not drawn' for text in checks.get('drawn', []) if text not in drawn]
     return problems

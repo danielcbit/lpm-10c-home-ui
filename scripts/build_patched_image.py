@@ -292,8 +292,8 @@ RESET_WARNING_PICTURE = 0x8D3C
 COMPANY_NAME_PICTURE = (0x8B0C, 0x8BCE)
 
 
-HOME_UI_SOURCES = ('home_ui.c', 'link_status.c', 'switch_port.c', 'ping_monitor.c', 'draw.c', 'cust_info.c',
-                   'vendor_text.c', 'subset_font.c', 'theme.c')
+HOME_UI_SOURCES = ('home_ui.c', 'link_status.c', 'switch_port.c', 'ping_monitor.c', 'duplicate_ip.c', 'draw.c',
+                   'cust_info.c', 'vendor_text.c', 'subset_font.c', 'theme.c')
 HOME_UI_KEEP = ('lpm_home_draw', 'lpm_home_key', 'lpm_cust_info_store_if_changed', 'lpm_cust_info_load_english',
                 'lpm_cust_info_defaults_english', 'lpm_reset_warning_title', *LINK_STATUS_CALLS, *PING_CALLS, *VLAN_CALLS,
                 *THEME_ROUTINES, 'lpm_tool_title')

@@ -19,5 +19,6 @@ extern const lpm_icon lpm_icon_latency;
 extern const lpm_icon lpm_icon_hosts;
 extern const lpm_icon lpm_icon_settings;
 extern const lpm_icon lpm_icon_vlan;
+extern const lpm_icon lpm_icon_duplicate;
 
 #endif

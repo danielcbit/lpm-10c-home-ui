@@ -639,18 +639,18 @@ The round trip is timed with the DWT cycle counter, as in Link status.
 
 A separate check calls `lpm_ping_tick_work` in states 11 and 12.
 
-## VLAN test (added 2026-10-22; emulator only, not yet on the tester)
+## VLAN test and Duplicate IP (added 2026-10-22; emulator only, not yet on the tester)
 
-One more network tool, with its own home item after Link status (the list now has 11 items). The vendor menu has ten slots, and M on home opens the slot in the selection byte (`0x20000151`, `0x0800D810`: a `tbb` over slots 0–9). The vendor code has no spare system state, so the new tool borrows the QC slot (4) and system state 8, which already routes everything to our code:
+Two more network tools, each its own home item after Link status (the list now has 12 items). The vendor menu has ten slots, and M on home opens the slot in the selection byte (`0x20000151`, `0x0800D810`: a `tbb` over slots 0–9). The vendor code has no spare system state, so the new tools borrow the QC slot (4) and system state 8, which already routes everything to our code:
 - M opens through `lpm_link_open`;
 - UP, DOWN, LEFT and RIGHT reach `lpm_link_key`, through `lpm_home_key`;
 - M in the tool reaches `lpm_link_run` (event `0x0B`);
 - the draw and frame messages reach `lpm_link_draw` and `lpm_tool_frame`;
 - BACK goes home through the vendor's state-8 case (`0x0800D882`, `set_sysState(2)`).
 
-**Which tool.** Two home items now select slot 4, so the home list keeps its own position in `tools_state` (`tools.h`, `0x20020580`). It trusts that position only while its magic word is set and the vendor byte still selects that item's slot; otherwise the first item of the slot is taken, as before. `lpm_link_open` asks the home list for the tool (`lpm_home_tool`), and the key, run, draw and frame handlers of state 8 dispatch on it.
+**Which tool.** Three home items now select slot 4, so the home list keeps its own position in `tools_state` (`tools.h`, `0x20020580`). It trusts that position only while its magic word is set and the vendor byte still selects that item's slot; otherwise the first item of the slot is taken, as before. `lpm_link_open` asks the home list for the tool (`lpm_home_tool`), and the key, run, draw and frame handlers of state 8 dispatch on it.
 
-**Shared list.** Each tool draws as a list of rows: a name, a verdict on the right, and detail lines, scrolled by UP and DOWN (`row_list` in `tools.h`). Link status's two tabs are two such lists, and the drawing, scrolling and scroll bar are the same code. Where Link status has its tabs, VLAN test has a heading line: the VLAN field.
+**Shared list.** Each tool draws as a list of rows: a name, a verdict on the right, and detail lines, scrolled by UP and DOWN (`row_list` in `tools.h`). Link status's two tabs are two such lists, and the drawing, scrolling and scroll bar are the same code. Where Link status has its tabs, the other tools have a heading line: the VLAN field, or the tool's progress and summary.
 
 **VLAN test.** It runs the six IPv4 checks of Link status (link, DHCP, gateway ARP, gateway ping, Internet ping and DNS) with every frame tagged with the chosen VLAN. LEFT and RIGHT move between the four digits of the VLAN ID, UP and DOWN change the digit (1–4094; it is kept until power off), and M runs.
 - **Tagging.** The frames come from two places: our own code, and the vendor DHCP and ARP routines that Link status calls. Both go through two wrappers in `link_status.c`, `lpm_vlan_transmit` and `lpm_vlan_receive`. Four calls inside the vendor routines are redirected to the wrappers (`VLAN_CALLS`):
@@ -661,11 +661,19 @@ One more network tool, with its own home item after Link status (the list now ha
 - **Receiving.** Only frames with the VLAN's tag are passed on, with the tag removed. An untagged frame or another VLAN's counts as nothing received, so a DHCP server on the native VLAN cannot make a missing VLAN pass.
 - **Frame sizes.** The vendor receive reads frames of up to 1,536 bytes (`0x0802289C`), so a full-size tagged frame (1,518 bytes) fits. Whether the DM9051's receive control (`0x31`) passes tagged frames over 1,518 bytes is not checked on the hardware; the tests use short frames.
 
+**Duplicate IP.** Its rows are:
+1. Physical link and 2. Address: the first two Link status checks (DHCP).
+3. Address free: three ARP probes for the leased address, a second apart, from 0.0.0.0 as RFC 5227 prescribes, so no host learns the address. A host that answers, claims the address in an ARP from it, or probes for it itself is listed by MAC, and fails the row.
+4. Gateway: two ARP requests for the gateway, with every MAC that answers listed. One MAC passes; none, or more than one, fails.
+
+Nothing is announced. The waits poll the key queue (`lpm_list_poll`, as Ping monitor does), so BACK leaves and M stops. A second M during a run reaches `lpm_link_run` through that polling, and only sets a stop request.
+
 **RAM**, above Ping monitor's:
 
 | Address | State | Size (bytes) |
 | --- | --- | --- |
 | `0x20020580` | `tools_state` | 20 |
+| `0x20020600` | `duplicate_state` | 64 |
 
 Each layout is pinned by a `_Static_assert` that the emulator reads. Every state is cleared on opening, except the VLAN ID, which is checked for range.
 
@@ -673,12 +681,15 @@ Each layout is pinned by a `_Static_assert` that the emulator reads. Every state
 
 | Region | Used (bytes) | Size (bytes) |
 | --- | --- | --- |
-| After the payload | 2,270 | 2,996 |
-| PICTURES | 29,980 | 89,512 |
+| After the payload | 2,258 | 2,996 |
+| PICTURES | 33,024 | 89,512 |
 
-**Offline check:** `preview_link_status.py` has two scenarios for this tool. Each selects its home item, opens it and checks that nothing touches the network before M, then presses M.
+**Offline check:** `preview_link_status.py` has five scenarios for these tools. Each selects its home item, opens it and checks that nothing touches the network before M, then presses M.
 - **VLAN test, on a trunk carrying VLAN 20:** all six checks pass, every frame we send carries tag 20, and both DHCP messages go out on VLAN 20.
 - **VLAN test, on a port without VLAN 20:** the address fails and the rest are skipped.
+- **Duplicate IP, free:** three probes from 0.0.0.0, and the gateway answers from one MAC.
+- **Duplicate IP, with conflicts:** a host answers the probe, and the gateway answers from two MACs. Both rows fail and list the MACs.
+- **Duplicate IP, no link.**
 
 `vlan-wrappers` calls the two wrappers directly: untagged without a run; tagged, and the frame put back, during one; VLAN 20 frames taken in untagged; untagged and VLAN 30 frames refused.
 

@@ -431,8 +431,10 @@ class PatchedImageTests(unittest.TestCase):
             self.skipTest('clang or lld not installed')
         b = build_patched_image
         home = (ROOT / 'src' / 'firmware_patch' / 'home_ui.c').read_text()
-        # A new item, replacing no vendor tool: every vendor slot 0-9 is still listed.
-        self.assertIn('{"VLAN test", &lpm_icon_vlan, 4, TOOL_VLAN}', home)
+        # New items, none replacing a vendor tool: every vendor slot 0-9 is still listed.
+        for item in ('{"VLAN test", &lpm_icon_vlan, 4, TOOL_VLAN}',
+                     '{"Duplicate IP", &lpm_icon_duplicate, 4, TOOL_DUPLICATE}'):
+            self.assertIn(item, home)
         for slot in range(10):
             self.assertRegex(home, rf'&lpm_icon_\w+, {slot}, ')
         # The vendor DHCP and ARP routines call transmit and receive at exactly these sites, now the wrappers.

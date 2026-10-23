@@ -1816,6 +1816,9 @@ ICONS = {
     # A luggage tag with its eyelet: the 802.1Q tag.
     'vlan': dict(strokes=[[(2.5, 12), (9, 4.5), (21.5, 4.5), (21.5, 19.5), (9, 19.5), (2.5, 12)]],
                  fills=[[(7.5, 10.5), (10.5, 10.5), (10.5, 13.5), (7.5, 13.5)]], pen=1.8),
+    # Two hosts claiming one address: overlapping boxes.
+    'duplicate': dict(strokes=[[(2.5, 8.5), (14.5, 8.5), (14.5, 20.5), (2.5, 20.5), (2.5, 8.5)],
+                               [(9.5, 8.5), (9.5, 3.5), (21.5, 3.5), (21.5, 15.5), (14.5, 15.5)]], pen=1.8),
 }
 
 

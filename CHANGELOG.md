@@ -6,9 +6,12 @@ whose heading matches the tag.
 
 ## Unreleased
 
-**New home item:** VLAN test (the list now has 11 tools; it replaces none).
+**New home items:** VLAN test and Duplicate IP (the list now has 12 tools;
+neither replaces an existing one).
 - VLAN test: the IPv4 Link status checks with every frame 802.1Q-tagged with
   a chosen VLAN (1-4094), so a trunk port can be checked VLAN by VLAN.
+- Duplicate IP: ARP probes (RFC 5227) for the DHCP address and for the
+  gateway; lists every MAC that conflicts.
 
 **Link status**
 - Opens waiting for M instead of running the checks at once, so the cable can

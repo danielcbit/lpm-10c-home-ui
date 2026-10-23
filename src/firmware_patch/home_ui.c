@@ -6,9 +6,9 @@
  * home-ui build installed only partly and crashed), so this has about 3 KB for
  * code after the payload; its fonts, icons and strings live in the freed CJK
  * glyph table (home_ui.ld). The vendor selection byte says which vendor slot
- * M opens; VLAN test shares the QC slot with Link status (tools.h), so the
- * list keeps its own position too, trusted only while the vendor byte still
- * selects that item's slot.
+ * M opens; VLAN test and Duplicate IP share the QC slot with Link status
+ * (tools.h), so the list keeps its own position too, trusted only while the
+ * vendor byte still selects that item's slot.
  *
  * Linked by scripts/build_patched_image.py with home_ui.ld at flash 0x0807244C,
  * after the vendor payload. The vendor menu calls are redirected here:
@@ -37,7 +37,7 @@
 #define LINK_SYS_STATE 8 /* Link status, whose UP and DOWN arrive here */
 #define FIRST_STATE 4
 #define REDRAW_MENU 7
-#define ITEMS 11
+#define ITEMS 12
 #define ROW_H 36
 #define ROWS 6
 #define LIST_W 232 /* the scroll bar sits to the right */
@@ -61,6 +61,7 @@ static const home_item items[ITEMS] = {
     {"PoE voltage", &lpm_icon_bolt, 6, 0},
     {"Link status", &lpm_icon_ethernet, 4, TOOL_LINK},
     {"VLAN test", &lpm_icon_vlan, 4, TOOL_VLAN},
+    {"Duplicate IP", &lpm_icon_duplicate, 4, TOOL_DUPLICATE},
     {"Link speed", &lpm_icon_speed, 5, 0},
     {"Ping monitor", &lpm_icon_latency, 7, 0},
     {"IP scan", &lpm_icon_hosts, 8, 0},

@@ -103,6 +103,9 @@
 #define vendor_transmit ((void (*)(void))0x080228B9u)
 #define receive lpm_vlan_receive /* tagged while a VLAN test runs */
 #define transmit lpm_vlan_transmit
+#define KEY_QUEUE (*(void *volatile *)0x20000054u)
+#define queue_receive ((int (*)(void *, void *, uint32_t))0x08024941u)
+#define key_match ((void (*)(void *))0x08016181u)
 #define dhcp_send ((void (*)(int, uint32_t, const uint8_t *, const uint8_t *))0x0801FE39u)
 #define dhcp_wait ((int (*)(uint32_t, uint32_t, int, uint8_t *, uint8_t *, uint8_t *, uint8_t *))0x0801FFD5u)
 #define arp_request ((void (*)(const uint8_t *, const uint8_t *))0x0802144Du)
@@ -496,6 +499,8 @@ static const row_list *list(void)
     switch (TOOLS->tool) {
     case TOOL_VLAN:
         return &vlan_list;
+    case TOOL_DUPLICATE:
+        return &lpm_duplicate_list;
     }
     return switch_tab() ? &switch_list : &checklist;
 }
@@ -596,6 +601,7 @@ static void draw_tabs(void)
  * the VLAN to test, with the digit edited on the accent, or the tool's summary. */
 static void draw_heading(void)
 {
+    char buffer[48];
     tools_state *t = TOOLS;
     fill(0, LPM_CONTENT_Y, LPM_SCREEN_W, VIEW_Y - LPM_CONTENT_Y - 1, LPM_C_BG);
     if (t->tool == TOOL_VLAN) {
@@ -608,6 +614,9 @@ static void draw_heading(void)
                  on ? LPM_C_ACCENT : LPM_C_FIELD);
         }
         text(&font_small, VLAN_FIELD_X + 56, LPM_CONTENT_Y + 6, "tagged", LPM_C_DIM, LPM_C_BG);
+    } else {
+        const char *line = lpm_duplicate_heading(buffer);
+        text_field(&font_small, 10, LPM_CONTENT_Y + 6, DETAIL_W, 0, line, LPM_C_DIM, LPM_C_BG);
     }
     fill(LPM_MARGIN, VIEW_Y - 1, LPM_SCREEN_W - 2 * LPM_MARGIN, 1, LPM_C_RULE);
 }
@@ -656,8 +665,9 @@ void lpm_tool_frame(void)
         vendor_tool_frame();
         return;
     }
-    static const char *const titles[] = {"Link status", "VLAN test"};
-    static const char *const footers[] = {"M run  UP/DN scroll  <> tab", "M run  UP/DN <> VLAN ID"};
+    static const char *const titles[] = {"Link status", "VLAN test", "Duplicate IP"};
+    static const char *const footers[] = {"M run  UP/DN scroll  <> tab", "M run  UP/DN <> VLAN ID",
+                                          "M run  UP/DN scroll"};
     int tool = TOOLS->tool;
     fill(0, LPM_CONTENT_Y, LPM_SCREEN_W, LPM_FOOTER_Y - LPM_CONTENT_Y, LPM_C_BG);
     draw_header(titles[tool], STATUS_X);
@@ -678,6 +688,32 @@ void lpm_tool_frame(void)
 static void show(void)
 {
     post_message(DRAW_MESSAGE, 0, 0);
+}
+
+void lpm_list_show(void)
+{
+    show();
+}
+
+void lpm_list_follow(int row)
+{
+    uint8_t *top = top_row();
+    if (row < *top)
+        *top = (uint8_t)row;
+    while (!fits(*top, row))
+        (*top)++;
+    show();
+}
+
+/* Each key waiting, through the vendor key table: BACK leaves state 8, M asks
+ * the run to stop (lpm_link_run), UP and DOWN scroll. */
+int lpm_list_poll(void)
+{
+    uint32_t item[2] = {0, 0};
+    void *queue = KEY_QUEUE;
+    while (queue && queue_receive(queue, item, 0) == 1)
+        key_match(item);
+    return SYS_STATE != LINK_SYS_STATE || TOOLS->stop;
 }
 
 /* UP or DOWN on the VLAN digit under the cursor, kept within 1-4094. */
@@ -1398,11 +1434,22 @@ static void run_checks(int vlan)
     show();
 }
 
-/* M in state 8 (event 0x0B): the open tool's run. */
+/* M in state 8 (event 0x0B): the open tool's run. A run that polls keys
+ * (Duplicate IP) gets here from its own polling: M then stops it. */
 void lpm_link_run(void)
 {
     tools_state *t = TOOLS;
-    if (t->tool == TOOL_LINK && switch_tab()) {
+    if (t->running) {
+        t->stop = 1;
+        return;
+    }
+    if (t->tool == TOOL_DUPLICATE) {
+        t->running = 1;
+        t->stop = 0;
+        lpm_duplicate_run();
+        t->running = 0;
+        show();
+    } else if (t->tool == TOOL_LINK && switch_tab()) {
         lpm_switch_run();
     } else {
         run_checks(t->tool == TOOL_VLAN);
@@ -1424,6 +1471,8 @@ void lpm_link_open(void)
         t->vlan = 1;
     if (t->digit >= VLAN_DIGITS)
         t->digit = VLAN_DIGITS - 1;
+    if (tool == TOOL_DUPLICATE)
+        lpm_duplicate_open();
     set_sys_state(LINK_SYS_STATE);
 }
 
@@ -1522,4 +1571,49 @@ int lpm_net_arp(const uint8_t *ip, uint8_t *mac)
 int lpm_net_echo(const uint8_t *mac, const uint8_t *target, unsigned seq, uint32_t *rtt_us, int (*poll)(void))
 {
     return exchange(LINK, mac, target, ECHO, seq, 1, rtt_us, poll);
+}
+
+/* ---- for Duplicate IP (key task) -------------------------------------------- */
+
+int lpm_net_dhcp(void)
+{
+    link_state *s = LINK;
+    uint8_t drawn = s->drawn_top;
+    clear(s);
+    s->drawn_top = drawn;
+    NET_BUSY = 1; /* the vendor DHCP blocks; no key is read meanwhile */
+    int ready = check_link(s) && check_address(s);
+    NET_BUSY = 0;
+    if (s->step[1] == LPM_STEP_PENDING)
+        s->step[1] = LPM_STEP_SKIPPED;
+    return ready;
+}
+
+void lpm_net_clear(void)
+{
+    uint8_t drawn = LINK->drawn_top;
+    clear(LINK);
+    LINK->drawn_top = drawn;
+}
+
+uint8_t *lpm_net_frame(void)
+{
+    return FRAME;
+}
+
+int lpm_net_receive(void)
+{
+    if (!(dm9051_read(NSR) & 1))
+        return 0;
+    return receive();
+}
+
+void lpm_net_arp_send(const uint8_t *target, const uint8_t *sender)
+{
+    arp_request(target, sender);
+}
+
+const uint8_t *lpm_net_own_mac(void)
+{
+    return OWN_MAC;
 }
