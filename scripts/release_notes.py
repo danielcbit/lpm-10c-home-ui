@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Release notes for a tag: its CHANGELOG.md section, then the build facts.
 
-  python3 scripts/release_notes.py v1.0.0 > notes.md
+  python3 scripts/release_notes.py v0.1.0 > notes.md
 
 Run after the release patch is in dist/ (see .github/workflows/release.yml). The
 notes say whether the built image is byte-identical to one confirmed on a

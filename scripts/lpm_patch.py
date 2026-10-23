@@ -11,12 +11,12 @@ released, or fails without writing anything.
 
   # Apply: give the official update (the .zip as downloaded from FNIRSI, the
   # LPM-10C.zip inside it, or the .bin)
-  python3 lpm_patch.py apply d68467f735b832bc57860df7f230ada41791625743186.zip lpm-10c-home-ui-v1.0.0.patch.json
+  python3 lpm_patch.py apply d68467f735b832bc57860df7f230ada41791625743186.zip lpm-10c-home-ui-v0.1.0.patch.json
   # -> LPM-10C_TX_V2.0.7_260907.bin in the current directory (the name the
   #    bootloader expects); copy it to the tester in BOOT mode, from Windows
 
   # Make (what the release workflow runs after building)
-  python3 scripts/lpm_patch.py make VENDOR.bin BUILT.bin out.patch.json --name v1.0.0
+  python3 scripts/lpm_patch.py make VENDOR.bin BUILT.bin out.patch.json --name v0.1.0
 
   # Extract the checked vendor image to where the build scripts look for it
   python3 scripts/lpm_patch.py extract LPM-10C.zip

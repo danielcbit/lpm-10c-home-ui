@@ -37,7 +37,7 @@ contains the reverse-engineering notes, tools and emulator that made it possible
 
 All other vendor tools (cable map, length, trace, port flash, PoE, link speed,
 IP scan, settings) are the vendor's own code. They are reached from the
-new home screen, and (since the next release) drawn in its theme.
+new home screen, and drawn in its theme.
 
 **Home screen**
 - One scrolling list of the tools, each with an icon and a plain name,
@@ -72,7 +72,7 @@ The list scrolls with UP/DOWN and follows the check in progress. The tester
 answers ARP and IPv6 neighbour solicitations while it runs, so routers can
 reach it.
 
-**Switch port** (unreleased; the second Link status tab, RIGHT to show it).
+**Switch port** (the second Link status tab, RIGHT to show it).
 Press M to listen for what the switch says about its port, for up to 32 s:
 
 | Row | Shows |
@@ -87,7 +87,7 @@ Press M to listen for what the switch says about its port, for up to 32 s:
 The tester announces itself as an LLDP-MED endpoint first, so LLDP-MED
 switches answer at once instead of at their next 30 s interval.
 
-**Ping monitor** (unreleased; replaces the vendor PING screen). Press M to
+**Ping monitor** (replaces the vendor PING screen). Press M to
 start and M to stop: one ping a second to the gateway, 1.1.1.1, 8.8.8.8 or an
 address of your own (LEFT/RIGHT), with the latest round trip, loss, a graph of
 the last 190 round trips, and min, average, max and variation. Hold M to type
@@ -95,25 +95,25 @@ the address: UP/DOWN change a digit, LEFT/RIGHT move, M uses it and BACK
 cancels. Each run gets its own address by DHCP; it stops with NO LINK if the
 cable is pulled, and keeps the tester on while it runs.
 
-**VLAN test** (unreleased, new home item). Runs the six IPv4 Link status
+**VLAN test** (new home item). Runs the six IPv4 Link status
 checks (link, DHCP, gateway ARP and ping, Internet ping, DNS) with every frame
 tagged with a VLAN you choose (LEFT/RIGHT pick a digit, UP/DOWN change it). It
 shows whether a trunk port carries that VLAN and whether it has DHCP and a
 working gateway. Replies from the untagged native VLAN don't count.
 
-**Duplicate IP** (unreleased, new home item). Takes a DHCP address, then
+**Duplicate IP** (new home item). Takes a DHCP address, then
 checks with three ARP probes (RFC 5227) whether another host already uses it,
 and whether the gateway answers from more than one MAC. Conflicting hosts are
 listed by MAC. Nothing is announced on the network.
 
-**Discovery** (unreleased, new home item). Takes a DHCP address and finds every
+**Discovery** (new home item). Takes a DHCP address and finds every
 host on the subnet (a /24 at most) by ARP. It lists each host's address, MAC,
 manufacturer (from a built-in table of about 13,500 MAC prefixes of 100 common
 brands) and the name the DHCP DNS server gives it. The gateway, the tester and
 any address answered by two MACs are marked. UP/DOWN scroll while it scans,
 and M stops it.
 
-**Theme for the vendor tools** (unreleased). Every vendor screen now uses the
+**Theme for the vendor tools**. Every vendor screen now uses the
 home screen's colours and Terminus font. Tool titles use the home list names.
 Layouts and behaviour are unchanged.
 
@@ -122,8 +122,9 @@ Layouts and behaviour are unchanged.
 
 **Space**
 - 139 KB of vendor pictures and code that nothing reaches any more (the old
-  grid menu, Chinese glyphs and pictures) are cleared for reuse, leaving
-  about 117 KB free for future tools. `scripts/check_dead_code.py` checks that
+  grid menu, Chinese glyphs and pictures) are cleared for reuse. The new
+  tools and the MAC manufacturer table use part of it, leaving about 45 KB
+  free for future tools. `scripts/check_dead_code.py` checks that
   nothing references a region before it is reused.
 
 The full list per release is in [CHANGELOG.md](CHANGELOG.md).

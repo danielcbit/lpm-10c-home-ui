@@ -1,6 +1,6 @@
 name: Release
 
-# Push a tag such as v1.0.0 whose section exists in CHANGELOG.md.
+# Push a tag such as v0.1.0 whose section exists in CHANGELOG.md.
 on:
   push:
     tags: ['v*']
