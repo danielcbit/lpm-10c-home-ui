@@ -1,7 +1,7 @@
 /*
  * The added tools that share Link status's system state 8: Link status itself,
- * VLAN test (link_status.c) and Duplicate IP (duplicate_ip.c). Their home
- * items all select the vendor QC slot, so M on any
+ * VLAN test (link_status.c), Duplicate IP (duplicate_ip.c) and Discovery
+ * (discovery.c). Their home items all select the vendor QC slot, so M on any
  * of them reaches lpm_link_open, which opens the one the home list shows; from
  * then on every key, draw and frame message of state 8 is passed to that tool.
  *
@@ -13,7 +13,7 @@
 
 #include <stdint.h>
 
-enum { TOOL_LINK, TOOL_VLAN, TOOL_DUPLICATE };
+enum { TOOL_LINK, TOOL_VLAN, TOOL_DUPLICATE, TOOL_DISCOVERY };
 
 #define TOOLS_MAGIC 0x4C504D54u   /* "LPMT": the RAM no longer holds its power-up pattern */
 #define TAGGING_MAGIC 0x564C414Eu /* "VLAN": frames are tagged */
@@ -54,18 +54,27 @@ const char *lpm_verdict(unsigned step, uint16_t *colour);
 const char *lpm_link_row(int row, const char **verdict, uint16_t *colour, char *detail);
 void lpm_list_follow(int row); /* scrolls the tool's list so row is shown, and posts a draw */
 void lpm_list_show(void);      /* posts a draw */
+void lpm_list_reset_view(void); /* the next draw clears the rows first: the list changed under them */
 int lpm_list_poll(void);       /* the keys waiting, through the vendor key table; 1 when the run should end */
 int lpm_net_dhcp(void);        /* rows 0 and 1 of Link status: link and address; 1 with an address */
 void lpm_net_clear(void);
 uint8_t *lpm_net_frame(void);
 int lpm_net_receive(void);
+void lpm_net_transmit(int length);
 void lpm_net_arp_send(const uint8_t *target, const uint8_t *sender);
 const uint8_t *lpm_net_own_mac(void);
+const uint8_t *lpm_net_dns(void);
 
 /* duplicate_ip.c */
 extern const row_list lpm_duplicate_list;
 void lpm_duplicate_open(void);
 void lpm_duplicate_run(void);
 const char *lpm_duplicate_heading(char *p);
+
+/* discovery.c */
+extern const row_list lpm_discovery_list;
+void lpm_discovery_open(void);
+void lpm_discovery_run(void);
+const char *lpm_discovery_heading(char *p);
 
 #endif

@@ -106,6 +106,13 @@ checks with three ARP probes (RFC 5227) whether another host already uses it,
 and whether the gateway answers from more than one MAC. Conflicting hosts are
 listed by MAC. Nothing is announced on the network.
 
+**Discovery** (unreleased, new home item). Takes a DHCP address and finds every
+host on the subnet (a /24 at most) by ARP. It lists each host's address, MAC,
+manufacturer (from a built-in table of about 13,500 MAC prefixes of 100 common
+brands) and the name the DHCP DNS server gives it. The gateway, the tester and
+any address answered by two MACs are marked. UP/DOWN scroll while it scans,
+and M stops it.
+
 **Theme for the vendor tools** (unreleased). Every vendor screen now uses the
 home screen's colours and Terminus font. Tool titles use the home list names.
 Layouts and behaviour are unchanged.
@@ -135,9 +142,9 @@ simulated network. The display and fonts are the tester's own, pixel for pixel.
 | --- | --- | --- |
 | ![IPv6 end of the list](docs/images/link-status-ipv6.png) | ![DHCPv6 address leased](docs/images/link-status-dhcpv6.png) | ![Internet ping and DNS failing](docs/images/link-status-no-internet.png) |
 
-| VLAN test | Duplicate IP |
-| --- | --- |
-| ![IPv4 checks on VLAN 20](docs/images/vlan-test.png) | ![A second host on our address and two gateway MACs](docs/images/duplicate-ip.png) |
+| VLAN test | Duplicate IP | Discovery | Discovery, scrolled |
+| --- | --- | --- | --- |
+| ![IPv4 checks on VLAN 20](docs/images/vlan-test.png) | ![A second host on our address and two gateway MACs](docs/images/duplicate-ip.png) | ![Hosts with manufacturers and names](docs/images/discovery.png) | ![A duplicate address and a private MAC](docs/images/discovery-end.png) |
 
 | Ping monitor | Ping target address | Switch port: LLDP | Switch port: end | Cable map, themed |
 | --- | --- | --- | --- | --- |

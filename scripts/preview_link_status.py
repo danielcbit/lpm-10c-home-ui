@@ -206,7 +206,7 @@ class Network:
                  ra=True, lifetime=1800, managed=False, autonomous=True, dhcp6=None, echo6=True,
                  internet6=(CLOUDFLARE6, GOOGLE6), slaac_in_use=False, lldp=None, cdp=None, cdp_at_ms=None,
                  dot1x=False, tagged=(), ping_rtts=None, keys=(), link_down_at=None, routed=(),
-                 trunk=None, conflict_mac=None, gateway_twin=None):
+                 trunk=None, lan_hosts=None, conflict_mac=None, gateway_twin=None, ptr_names=None, duplicate_host=None):
         self.t, self.uc = tester, tester.uc
         self.link, self.ten, self.full, self.offer, self.ack = link, ten, full, offer, ack
         self.gateway, self.arp, self.echo, self.arp_first = gateway, arp, echo, arp_first
@@ -242,9 +242,13 @@ class Network:
         self.trunk = set(trunk or ())
         self.vlans_sent = []  # the VLAN of each tagged frame we sent
         self.dhcp_vlans = []  # the VLAN (0 untagged) of each DHCP DISCOVER or REQUEST
-        # Duplicate IP: a host that also uses our address, and a second MAC answering for the gateway.
-        self.conflict_mac, self.gateway_twin = conflict_mac, gateway_twin
-        self.arp_probes = []
+        # Duplicate IP and Discovery: the hosts that answer ARP {ip: mac}, a host that also uses our
+        # address, a second MAC answering for the gateway, PTR names {ip: name}, and (ip, mac) of a
+        # second host answering for an address that one of lan_hosts has.
+        self.lan_hosts = dict(lan_hosts or {})
+        self.conflict_mac, self.gateway_twin, self.duplicate_host = conflict_mac, gateway_twin, duplicate_host
+        self.ptr_names = dict(ptr_names or {})
+        self.arp_probes, self.arp_asked, self.ptr_asked = [], [], []
         self.raw_queue = False  # deliver queued frames as they are, without the trunk's tag
         self.sent_frames = []
         self.keys_dropped = 0
@@ -369,11 +373,16 @@ class Network:
         if sender != OUR_IP:
             self.errors.append(f'ARP request sent from {sender.hex()}')
         self.asked = target
-        if self.tool() == 2 and self.carried():  # Duplicate IP reads the answers itself
+        if self.tool() in (2, 3) and self.carried():  # Duplicate IP and Discovery read the answers themselves
+            self.arp_asked.append(target)
             if target == self.gateway and self.arp:
                 self.arp_reply(800, GATEWAY_MAC, target)
                 if self.gateway_twin:
                     self.arp_reply(1200, self.gateway_twin, target)
+            if target in self.lan_hosts:
+                self.arp_reply(600, self.lan_hosts[target], target)
+            if self.duplicate_host and target == self.duplicate_host[0]:
+                self.arp_reply(900, self.duplicate_host[1], target)
         return 0
 
     def arp_wait(self):
@@ -429,6 +438,8 @@ class Network:
                 self.errors.append(f'bad ARP frame {f.hex()}')
             return 0
         ip = f[14:34]
+        if ip[9] == 17 and f[34:36] == struct.pack('>H', 50001):
+            return self.ptr_query(f, length)
         if ip[9] == 17:
             return self.dns_query(f, length)
         if f[0:6] != GATEWAY_MAC or f[6:12] != self.own_mac() or f[12:14] != b'\x08\x00':
@@ -522,6 +533,36 @@ class Network:
         if item_bytes:
             self.write(item, item_bytes)
             return 1
+        return 0
+
+    def ptr_query(self, f, length):
+        """Discovery's reverse lookup of a host: its name from ptr_names, or NXDOMAIN."""
+        ip, server = f[14:34], f[30:34]
+        if checksum(ip) != 0xFFFF or ip[12:16] != OUR_IP or f[0:6] != GATEWAY_MAC or server != self.dhcp_dns:
+            self.errors.append(f'bad PTR query {f[:42].hex()}')
+        query = f[42:length]
+        ident = struct.unpack('>H', query[:2])[0]
+        labels, p = [], 12
+        while query[p]:
+            labels.append(query[p + 1:p + 1 + query[p]].decode())
+            p += 1 + query[p]
+        question = query[12:p + 5]
+        if labels[4:] != ['in-addr', 'arpa'] or query[p + 1:p + 5] != b'\x00\x0c\x00\x01':
+            self.errors.append(f'bad PTR question {labels}')
+            return 0
+        host = bytes(int(x) for x in reversed(labels[:4]))
+        self.ptr_asked.append(host)
+        name = self.ptr_names.get(host)
+        if name:
+            rdata = b''.join(bytes([len(part)]) + part.encode() for part in name.split('.')) + b'\x00'
+            answer = b'\xc0\x0c\x00\x0c\x00\x01' + struct.pack('>IH', 300, len(rdata)) + rdata
+            response = struct.pack('>HHHHHH', ident, 0x8180, 1, 1, 0, 0) + question + answer
+        else:
+            response = struct.pack('>HHHHHH', ident, 0x8183, 1, 0, 0, 0) + question
+        reply_udp = struct.pack('>HHHH', 53, 50001, 8 + len(response), 0) + response
+        reply_ip = sealed(bytes([0x45, 0]) + struct.pack('>H', 20 + len(reply_udp)) + bytes(4)
+                          + bytes([64, 17, 0, 0]) + server + OUR_IP, 10)
+        self.queue.append((self.us + 2000, self.own_mac() + GATEWAY_MAC + b'\x08\x00' + reply_ip + reply_udp))
         return 0
 
     def dns_query(self, f, length):
@@ -1167,14 +1208,24 @@ def check_port_mark(fb):
     return problems
 
 
-# ---- VLAN test and Duplicate IP (tools.h) ------------------------------------------
+# ---- VLAN test, Duplicate IP and Discovery (tools.h) -------------------------------
 
-TOOL_VLAN, TOOL_DUPLICATE = 1, 2
+TOOL_VLAN, TOOL_DUPLICATE, TOOL_DISCOVERY = 1, 2, 3
 DUP = 0x20020600  # duplicate_state in duplicate_ip.c
 DUP_STATE = struct.Struct('<4sBBBB24s24s4s4s')
+DISC, HOSTS = 0x20020680, 0x20020800  # discovery_state and its hosts in discovery.c
+DISC_STATE, HOST = struct.Struct('<BBBB4sHHHH'), struct.Struct('<4s6s6sBB24s')
+DISC_PHASES = ['idle', 'address', 'no link', 'no address', 'scanning', 'naming', 'done', 'stopped']
 ACTION_UP, ACTION_DOWN, ACTION_LEFT, ACTION_RIGHT = 2, 3, 4, 5  # lpm_home_key's actions, as lpm_link_key gets them
 
-MAC_SYNOLOGY, MAC_INTRUDER = bytes.fromhex('001132445566'), bytes.fromhex('00deadbeef01')
+MAC_APPLE, MAC_PI, MAC_SYNOLOGY = bytes.fromhex('000393a1b2c3'), bytes.fromhex('28cdc1010203'), \
+    bytes.fromhex('001132445566')
+MAC_PRIVATE, MAC_UNKNOWN, MAC_INTRUDER = bytes.fromhex('5a1122334455'), bytes.fromhex('fcfcfc000001'), \
+    bytes.fromhex('00deadbeef01')
+HOME_LAN = {bytes([192, 168, 1, 10]): MAC_APPLE, bytes([192, 168, 1, 20]): MAC_PI,
+            bytes([192, 168, 1, 30]): MAC_PRIVATE, bytes([192, 168, 1, 40]): MAC_SYNOLOGY,
+            bytes([192, 168, 1, 254]): MAC_UNKNOWN}
+HOME_NAMES = {GATEWAY: 'router.lan', bytes([192, 168, 1, 10]): 'MacBook-Pro.lan', bytes([192, 168, 1, 20]): 'pi.lan'}
 VLAN_20 = [ACTION_LEFT, ACTION_UP, ACTION_UP, ACTION_RIGHT, ACTION_DOWN]  # from VLAN 0001: tens to 2, ones to 0
 
 TOOL_SCENARIOS = {
@@ -1191,7 +1242,30 @@ TOOL_SCENARIOS = {
                                 drawn=['1 other host: 00:DE:AD:BE:EF:01', '2 MACs'])),
     'duplicate-no-link': (TOOL_DUPLICATE, dict(link=False), [],
                           dict(steps=['FAIL', 'SKIPPED', 'SKIPPED', 'SKIPPED'], probes=0)),
+    'discovery-home': (TOOL_DISCOVERY, dict(lan_hosts=HOME_LAN, ptr_names=HOME_NAMES,
+                                            duplicate_host=(bytes([192, 168, 1, 40]), MAC_INTRUDER)), [],
+                       dict(phase='done', hosts=[(GATEWAY, 'GATEWAY', 'router.lan'), (bytes([192, 168, 1, 10]), '', 'MacBook-Pro.lan'),
+                                                 (bytes([192, 168, 1, 20]), '', 'pi.lan'), (OUR_IP, 'THIS', ''),
+                                                 (bytes([192, 168, 1, 30]), '', ''), (bytes([192, 168, 1, 40]), 'DUPLICATE', ''),
+                                                 (bytes([192, 168, 1, 254]), '', '')],
+                            drawn=['00:03:93:A1:B2:C3 Apple', '28:CD:C1:01:02:03 Raspberry Pi', 'private MAC',
+                                   '00:11:32:44:55:66 Synology', 'and 00:DE:AD:BE:EF:01',
+                                   '7 hosts on 192.168.1.0/24, 1 dup'])),
+    'discovery-stopped': (TOOL_DISCOVERY, dict(lan_hosts=HOME_LAN, keys=[(600_000, M, SHORT)]), [],
+                          dict(phase='stopped', drawn=['stopped'])),
+    'discovery-no-link': (TOOL_DISCOVERY, dict(link=False), [], dict(phase='no link', drawn=['No link'])),
 }
+
+
+def read_hosts(uc):
+    d = DISC_STATE.unpack(bytes(uc.mem_read(DISC, DISC_STATE.size)))
+    state = {'phase': DISC_PHASES[d[0]] if d[0] < len(DISC_PHASES) else d[0], 'top': d[1], 'prefix': d[2],
+             'net': d[4], 'count': d[5], 'duplicates': d[8]}
+    hosts = []
+    for i in range(min(d[5], 254)):
+        ip, mac, other, flags, vendor, name = HOST.unpack(bytes(uc.mem_read(HOSTS + i * HOST.size, HOST.size)))
+        hosts.append({'ip': ip, 'mac': mac, 'flags': flags, 'vendor': vendor, 'name': name.split(b'\0')[0].decode()})
+    return state, hosts
 
 
 def run_tool_scenario(image, sram, symbols, entries, tool, settings, actions, checks, out, name):
@@ -1206,7 +1280,8 @@ def run_tool_scenario(image, sram, symbols, entries, tool, settings, actions, ch
     # The home list left on the tool (lpm_home_key sets both), VLAN 1 with the ones digit selected.
     tester.uc.mem_write(TOOLS, struct.pack('<IIHHBBBBB', TOOLS_MAGIC, 0, 0, 1, 5 + tool, 0xEE, 3, 0, 0))
     tester.uc.mem_write(MENU_SELECTION, bytes([8]))
-    tester.uc.mem_write(DUP, b'\xa5' * DUP_STATE.size)  # whatever the RAM held: the open must clear it
+    for address, size in ((DUP, DUP_STATE.size), (DISC, DISC_STATE.size)):
+        tester.uc.mem_write(address, b'\xa5' * size)  # whatever the RAM held: the open must clear it
     tester.net = net = Network(tester, **settings)
     before = {region: bytes(tester.uc.mem_read(*region)) for region in (IP_CONFIG, CUST_INFO)}
     problems = []
@@ -1253,7 +1328,7 @@ def run_tool_scenario(image, sram, symbols, entries, tool, settings, actions, ch
             problems.append(f'frames tagged {sorted(set(net.vlans_sent))}')
         if not net.dhcp_vlans or set(net.dhcp_vlans) != {checks['vlan']}:
             problems.append(f'DHCP on VLANs {net.dhcp_vlans}')
-    else:
+    elif tool == TOOL_DUPLICATE:
         d = DUP_STATE.unpack(bytes(tester.uc.mem_read(DUP, DUP_STATE.size)))
         state = read_state(tester.uc)
         steps = state['steps'][:2] + [STEPS[x] for x in d[0][2:]]
@@ -1265,7 +1340,27 @@ def run_tool_scenario(image, sram, symbols, entries, tool, settings, actions, ch
         probes = checks.get('probes', 3 if checks['steps'][1] == 'PASS' else 0)
         if net.arp_probes != [OUR_IP] * probes:
             problems.append(f'probes {[p.hex() for p in net.arp_probes]}')
-    drawn = ' | '.join(tester.drawn)
+    else:
+        state, hosts = read_hosts(tester.uc)
+        if state['phase'] != checks['phase']:
+            problems.append(f'phase {state["phase"]}')
+        if 'hosts' in checks:
+            got = [(h['ip'], h['name']) for h in hosts]
+            want = [(ip, host_name) for ip, _, host_name in checks['hosts']]
+            if got != want:
+                problems.append(f'hosts {[(".".join(map(str, ip)), n) for ip, n in got]}')
+            if len(net.arp_asked) != 253 + 253 - (len(hosts) - 1):
+                problems.append(f'{len(net.arp_asked)} ARP requests, expected one sweep and the silent again')
+            if sorted(net.ptr_asked) != sorted(h['ip'] for h in hosts if not h['flags'] & 1):
+                problems.append(f'names asked for {[a.hex() for a in net.ptr_asked]}')
+            # Scrolling the result: DOWN moves the list, and the end can be reached.
+            for _ in range(10):
+                tester.call(key, ACTION_DOWN)
+            tester.call(draw)
+            P.png(out / f'{name}-end.png', tester.fb, P.W, P.H)
+            if read_hosts(tester.uc)[0]['top'] == 0:
+                problems.append('DOWN did not scroll the hosts')
+    drawn = ' | '.join(tester.drawn)  # the result, and for Discovery its end too
     problems += [f'"{text}" not drawn' for text in checks.get('drawn', []) if text not in drawn]
     return problems
 

@@ -1819,6 +1819,8 @@ ICONS = {
     # Two hosts claiming one address: overlapping boxes.
     'duplicate': dict(strokes=[[(2.5, 8.5), (14.5, 8.5), (14.5, 20.5), (2.5, 20.5), (2.5, 8.5)],
                                [(9.5, 8.5), (9.5, 3.5), (21.5, 3.5), (21.5, 15.5), (14.5, 15.5)]], pen=1.8),
+    # A magnifier.
+    'discovery': dict(strokes=[arc(10, 10, 7, 7, 0, 360, 32), [(15, 15), (21.5, 21.5)]], pen=2.0),
 }
 
 

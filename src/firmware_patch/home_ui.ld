@@ -18,6 +18,11 @@ MEMORY
        now refuses, kept clear of picture 11 after them and aligned. Pictures 4,
        0 and 2, 8 and 3, 21, 7 and 6, and 1 are freed too and not used yet. */
     PICTURES (rx) : ORIGIN = 0x080584FC, LENGTH = 0x0806E2A4 - 0x080584FC
+    /* Four more of the freed pictures (DEAD_RANGES), for Discovery's MAC prefix table. */
+    OUI1 (r)      : ORIGIN = 0x08026B34, LENGTH = 0x0802A8FC - 0x08026B34
+    OUI2 (r)      : ORIGIN = 0x0802C4AC, LENGTH = 0x0802EAD0 - 0x0802C4AC
+    OUI3 (r)      : ORIGIN = 0x0802FA0C, LENGTH = 0x08031EBD - 0x0802FA0C
+    OUI4 (r)      : ORIGIN = 0x080323D4, LENGTH = 0x08034359 - 0x080323D4
     RAM (rw)      : ORIGIN = 0x20020000, LENGTH = 0
 }
 
@@ -33,6 +38,12 @@ SECTIONS
         *cust_info.o(.text*)
         *vendor_text.o(.text*)
     } > FLASH
+
+    /* Discovery's MAC prefix table, in chunks sized for these (scripts/gen_oui.py). */
+    .oui1 : { *(.rodata.lpm_oui_1) } > OUI1
+    .oui2 : { *(.rodata.lpm_oui_2) } > OUI2
+    .oui3 : { *(.rodata.lpm_oui_3) } > OUI3
+    .oui4 : { *(.rodata.lpm_oui_4) } > OUI4
 
     /* Everything else: Link status, fonts, icons, strings and tables. Any flash
        address is in BL range of any other. */
