@@ -5,8 +5,10 @@
  * The update file may not grow beyond the vendor's 434,176 bytes (a larger
  * home-ui build installed only partly and crashed), so this has about 3 KB for
  * code after the payload; its fonts, icons and strings live in the freed CJK
- * glyph table (home_ui.ld). It keeps no RAM state: everything is derived from
- * the vendor selection byte.
+ * glyph table (home_ui.ld). The vendor selection byte says which vendor slot
+ * M opens; VLAN test shares the QC slot with Link status (tools.h), so the
+ * list keeps its own position too, trusted only while the vendor byte still
+ * selects that item's slot.
  *
  * Linked by scripts/build_patched_image.py with home_ui.ld at flash 0x0807244C,
  * after the vendor payload. The vendor menu calls are redirected here:
@@ -25,6 +27,7 @@
 #include "draw.h"
 #include "lpm_assets.h"
 #include "lpm_theme.h"
+#include "tools.h"
 
 #define MENU_STATE ((volatile uint8_t *)0x20000150u)
 
@@ -34,7 +37,7 @@
 #define LINK_SYS_STATE 8 /* Link status, whose UP and DOWN arrive here */
 #define FIRST_STATE 4
 #define REDRAW_MENU 7
-#define ITEMS 10
+#define ITEMS 11
 #define ROW_H 36
 #define ROWS 6
 #define LIST_W 232 /* the scroll bar sits to the right */
@@ -44,16 +47,24 @@ typedef struct {
     const char *name;
     const lpm_icon *icon;
     uint8_t vendor; /* index in the vendor menu: state byte - 4 */
+    uint8_t tool;   /* TOOL_*, for the items in the QC slot (4) */
 } home_item;
 
 /* Design order and names. Link status (link_status.c) replaces the vendor QC
- * test in its slot; Link speed is kept, as only it can see a gigabit link. */
+ * test in its slot, and the added network tools share it; Link speed is kept,
+ * as only it can see a gigabit link. */
 static const home_item items[ITEMS] = {
-    {"Cable map", &lpm_icon_cable_map, 0},  {"Cable length", &lpm_icon_ruler, 3},
-    {"Cable trace", &lpm_icon_trace, 1},    {"Port flash", &lpm_icon_port_flash, 2},
-    {"PoE voltage", &lpm_icon_bolt, 6},     {"Link status", &lpm_icon_ethernet, 4},
-    {"Link speed", &lpm_icon_speed, 5},     {"Ping monitor", &lpm_icon_latency, 7},
-    {"IP scan", &lpm_icon_hosts, 8},        {"Settings", &lpm_icon_settings, 9},
+    {"Cable map", &lpm_icon_cable_map, 0, 0},
+    {"Cable length", &lpm_icon_ruler, 3, 0},
+    {"Cable trace", &lpm_icon_trace, 1, 0},
+    {"Port flash", &lpm_icon_port_flash, 2, 0},
+    {"PoE voltage", &lpm_icon_bolt, 6, 0},
+    {"Link status", &lpm_icon_ethernet, 4, TOOL_LINK},
+    {"VLAN test", &lpm_icon_vlan, 4, TOOL_VLAN},
+    {"Link speed", &lpm_icon_speed, 5, 0},
+    {"Ping monitor", &lpm_icon_latency, 7, 0},
+    {"IP scan", &lpm_icon_hosts, 8, 0},
+    {"Settings", &lpm_icon_settings, 9, 0},
 };
 
 void lpm_cust_info_pin_english(void); /* cust_info.c */
@@ -61,6 +72,9 @@ void lpm_cust_info_pin_english(void); /* cust_info.c */
 static int selected_position(void)
 {
     int vendor = MENU_STATE[1] - FIRST_STATE;
+    tools_state *t = TOOLS;
+    if (t->magic == TOOLS_MAGIC && t->position < ITEMS && items[t->position].vendor == vendor)
+        return t->position;
     for (int i = 0; i < ITEMS; i++)
         if (items[i].vendor == vendor)
             return i;
@@ -105,8 +119,8 @@ void lpm_home_draw(int partial)
         count[n++] = '1';
     count[n++] = (char)('0' + (selected + 1) % 10);
     count[n++] = '/';
-    count[n++] = '1';
-    count[n++] = '0';
+    count[n++] = '0' + ITEMS / 10;
+    count[n++] = '0' + ITEMS % 10;
     count[n] = 0;
     text_right(&font_small, LPM_SCREEN_W - 10, LPM_TITLE_Y + 12, count, LPM_C_DIM, LPM_C_BG);
 
@@ -157,5 +171,13 @@ void lpm_home_key(int action)
     else if ((action == 3 || action == 5) && position < ITEMS - 1)
         position++;
     MENU_STATE[1] = (uint8_t)(FIRST_STATE + items[position].vendor);
+    TOOLS->position = (uint8_t)position;
+    TOOLS->magic = TOOLS_MAGIC;
     post_message(REDRAW_MENU, 0, 0);
+}
+
+/* The tool of the selected item, for lpm_link_open. */
+int lpm_home_tool(void)
+{
+    return items[selected_position()].tool;
 }

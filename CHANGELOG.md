@@ -6,6 +6,10 @@ whose heading matches the tag.
 
 ## Unreleased
 
+**New home item:** VLAN test (the list now has 11 tools; it replaces none).
+- VLAN test: the IPv4 Link status checks with every frame 802.1Q-tagged with
+  a chosen VLAN (1-4094), so a trunk port can be checked VLAN by VLAN.
+
 **Link status**
 - Opens waiting for M instead of running the checks at once, so the cable can
   be plugged in first.

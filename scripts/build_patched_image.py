@@ -252,6 +252,14 @@ PING_CALLS = {
     'lpm_ping_draw': (0x6B04, 0x801378E),   # GUI message 0x15: bx lr in the vendor
     'lpm_ping_tick_work': (0x1A3E6, 0x8015114),  # 1 ms tick, states 11 and 12: the vendor PING/SCAN network work
 }
+# VLAN test: the vendor DHCP and ARP routines send and receive through the 802.1Q wrappers in
+# link_status.c, which tag only while a VLAN test runs. (BL file offset, vendor target replaced).
+VLAN_CALLS = {
+    'lpm_vlan_transmit': ((0x16FBA, 0x80228B8),   # in dhcp_send 0x0801FE38
+                          (0x18506, 0x80228B8)),  # in arp_request 0x0802144C
+    'lpm_vlan_receive': ((0x17006, 0x8022810),    # in dhcp_wait 0x0801FFD4
+                         (0x19010, 0x8022810)),   # in arp_wait 0x08021FEC
+}
 LINK_STATUS_DATA = [
     # Key table 0x08026264, entry 19 {state mask 0x100, key, press, event 0x0B}: right key held -> M pressed.
     (0x1D300, b'\x01\x08', b'\x04\x03', 'key table entry 19 (state 8, event 0x0B): key 1 held -> key 4 (M) pressed'),
@@ -287,7 +295,7 @@ COMPANY_NAME_PICTURE = (0x8B0C, 0x8BCE)
 HOME_UI_SOURCES = ('home_ui.c', 'link_status.c', 'switch_port.c', 'ping_monitor.c', 'draw.c', 'cust_info.c',
                    'vendor_text.c', 'subset_font.c', 'theme.c')
 HOME_UI_KEEP = ('lpm_home_draw', 'lpm_home_key', 'lpm_cust_info_store_if_changed', 'lpm_cust_info_load_english',
-                'lpm_cust_info_defaults_english', 'lpm_reset_warning_title', *LINK_STATUS_CALLS, *PING_CALLS,
+                'lpm_cust_info_defaults_english', 'lpm_reset_warning_title', *LINK_STATUS_CALLS, *PING_CALLS, *VLAN_CALLS,
                 *THEME_ROUTINES, 'lpm_tool_title')
 
 
@@ -342,6 +350,8 @@ def home_ui():
     patches += LINK_STATUS_DATA
     patches += [redirect_call(site, old, (symbols[name] & ~1) - BASE, f'{site + BASE:#010x}: {old:#010x} -> {name}')
                 for name, (site, old) in PING_CALLS.items()]
+    patches += [redirect_call(site, old, (symbols[name] & ~1) - BASE, f'{site + BASE:#010x}: {old:#010x} -> {name}')
+                for name, sites in VLAN_CALLS.items() for site, old in sites]
     patches.append(redirect_call(TOOL_TITLE_CALL, 0x8018D48, (symbols['lpm_tool_title'] & ~1) - BASE,
                                  'tool frame title 0x0800F3F8: draw_string -> lpm_tool_title (home list names)'))
     vendor = VENDOR.read_bytes()

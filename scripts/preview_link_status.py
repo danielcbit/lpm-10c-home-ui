@@ -61,6 +61,7 @@ ROOT = P.ROOT
 LINK = 0x20020000  # link_state in link_status.c
 FRAME, FRAME_LEN, OWN_MAC, NET_BUSY, SYS_STATE = 0x2000F0AC, 0x20000224, 0x20000214, 0x200000A9, 0x20000150
 MENU_SELECTION = 0x20000151
+TOOLS, TOOLS_MAGIC, TAGGING_MAGIC = 0x20020580, 0x4C504D54, 0x564C414E  # tools_state in tools.h
 IP_CONFIG, CUST_INFO = (0x20000306, 0x30), (0x20002CF0, 0xC8)
 CYCCNT, DEMCR = 0xE0001004, 0xE000EDFC
 OPEN_SITE, FRAME_SITE, DRAW_SITE, RUN_SITE = 0x4830, 0x6C20, 0x6ABE, 0x48CC
@@ -204,7 +205,8 @@ class Network:
                  dns_answers=(GATEWAY, LOCAL_DNS, CLOUDFLARE), dns_rcode=None, cname=False,
                  ra=True, lifetime=1800, managed=False, autonomous=True, dhcp6=None, echo6=True,
                  internet6=(CLOUDFLARE6, GOOGLE6), slaac_in_use=False, lldp=None, cdp=None, cdp_at_ms=None,
-                 dot1x=False, tagged=(), ping_rtts=None, keys=(), link_down_at=None, routed=()):
+                 dot1x=False, tagged=(), ping_rtts=None, keys=(), link_down_at=None, routed=(),
+                 trunk=None):
         self.t, self.uc = tester, tester.uc
         self.link, self.ten, self.full, self.offer, self.ack = link, ten, full, offer, ack
         self.gateway, self.arp, self.echo, self.arp_first = gateway, arp, echo, arp_first
@@ -236,6 +238,12 @@ class Network:
         self.echo_times = []
         self.link_down_at = link_down_at  # the cable is pulled at this time (us)
         self.routed = (CLOUDFLARE, GOOGLE, *routed)  # addresses beyond the gateway that answer echoes
+        # VLAN test: the VLANs the port carries tagged (None: an access port, which drops tagged frames).
+        self.trunk = set(trunk or ())
+        self.vlans_sent = []  # the VLAN of each tagged frame we sent
+        self.dhcp_vlans = []  # the VLAN (0 untagged) of each DHCP DISCOVER or REQUEST
+        self.raw_queue = False  # deliver queued frames as they are, without the trunk's tag
+        self.sent_frames = []
         self.keys_dropped = 0
         self.idle_resets = 0
         self.app_commands = []
@@ -297,8 +305,19 @@ class Network:
         self.t.messages.append(0x36)
         return 0
 
+    def tagging(self):
+        """The VLAN the wrappers tag with (tools_state in tools.h), or 0."""
+        magic, tagging, tag = struct.unpack('<IIH', self.uc.mem_read(TOOLS, 10))
+        return tag if tagging == TAGGING_MAGIC else 0
+
+    def carried(self):
+        """Whether frames sent now reach the network: untagged always, tagged only on a trunk VLAN."""
+        vlan = self.tagging()
+        return not vlan or vlan in self.trunk
+
     def dhcp_send(self):
         self.us += 300
+        self.dhcp_vlans.append(self.tagging())
         return 0
 
     def dhcp_reply(self, kind):
@@ -316,7 +335,7 @@ class Network:
 
     def dhcp_wait(self):
         xid, timeout, kind, ip, mask, gateway, server = (self.arg(n) for n in range(7))
-        if (kind == 2 and self.offer) or (kind == 5 and self.ack):
+        if self.carried() and ((kind == 2 and self.offer) or (kind == 5 and self.ack)):
             self.us += 3000
             self.dhcp_reply(kind)
             self.write(ip, OUR_IP)
@@ -330,6 +349,7 @@ class Network:
 
     def arp_request(self):
         target, sender = bytes(self.uc.mem_read(self.arg(0), 4)), bytes(self.uc.mem_read(self.arg(1), 4))
+        self.us += 40
         if sender != OUR_IP:
             self.errors.append(f'ARP request sent from {sender.hex()}')
         self.asked = target
@@ -337,6 +357,9 @@ class Network:
 
     def arp_wait(self):
         ip, timeout = bytes(self.uc.mem_read(self.arg(0), 4)), self.arg(1)
+        if not self.carried():
+            self.us += timeout * 1000
+            return 0
         if ip == LOCAL_DNS and self.dhcp_dns == LOCAL_DNS:
             self.write(FRAME, bytes(14) + bytes(8) + LOCAL_DNS_MAC + LOCAL_DNS + bytes(10))
             self.us += 800
@@ -362,6 +385,17 @@ class Network:
         self.us += 30
         length = struct.unpack('<H', self.uc.mem_read(FRAME_LEN, 2))[0]
         f = bytes(self.uc.mem_read(FRAME, length))
+        self.sent_frames.append(f)
+        if f[12:14] == b'\x81\x00':  # 802.1Q: the switch reads the VLAN and passes the frame untagged
+            vlan = struct.unpack('>H', f[14:16])[0] & 0xFFF
+            self.vlans_sent.append(vlan)
+            if vlan != self.tagging():
+                self.errors.append(f'frame tagged {vlan} while the wrappers tag {self.tagging()}')
+            f, length = f[:12] + f[16:], length - 4
+            if vlan not in self.trunk:
+                return 0
+        elif self.tagging() and f[12:14] not in (b'\x88\xcc', b'\x88\x8e'):
+            self.errors.append(f'untagged frame {f[12:14].hex()} during a VLAN test')
         if f[12:14] in (b'\x88\xcc', b'\x88\x8e'):
             return self.transmit_switch(f, length)
         if f[12:14] == b'\x86\xdd':
@@ -633,6 +667,9 @@ class Network:
             if frame[0] & 1 and frame[:6] != b'\xff' * 6 and not self.rcr & RCR_ALL:
                 self.multicast_dropped += 1
                 continue
+            vlan = self.tagging()
+            if vlan and not self.raw_queue:  # the trunk delivers the VLAN's frames tagged
+                frame = frame[:12] + struct.pack('>HH', 0x8100, vlan) + frame[12:]
             self.write(FRAME, frame)
             return len(frame)
 
@@ -988,6 +1025,48 @@ def run_ping_scenario(image, sram, symbols, entries, settings, checks, out, name
     return problems, net.us / 1e6
 
 
+def check_vlan_wrappers(image, sram, symbols):
+    """lpm_vlan_transmit and lpm_vlan_receive, as the vendor DHCP and ARP routines reach them: untouched
+    without a VLAN test; during one, the tag goes in before sending and the frame is put back after, and only
+    frames with the VLAN's tag come in, untagged."""
+    from unicorn.arm_const import UC_ARM_REG_R0
+    tester = LinkTester(image, sram, symbols['text'] & ~1)
+    tester.net = net = Network(tester, trunk={20})
+    net.raw_queue = True
+    transmit, receive = symbols['lpm_vlan_transmit'] & ~1, symbols['lpm_vlan_receive'] & ~1
+    frame = b'\xff' * 6 + bytes.fromhex('020000000001') + b'\x08\x06' + bytes(range(46))
+    tag20 = struct.pack('>HH', 0x8100, 20)
+    problems = []
+
+    def send(tagging):
+        tester.uc.mem_write(TOOLS, struct.pack('<IIHH', TOOLS_MAGIC, TAGGING_MAGIC if tagging else 0, 20, 20))
+        tester.uc.mem_write(FRAME, frame)
+        tester.uc.mem_write(FRAME_LEN, struct.pack('<H', len(frame)))
+        tester.call(transmit)
+        after = bytes(tester.uc.mem_read(FRAME, len(frame))), struct.unpack('<H', tester.uc.mem_read(FRAME_LEN, 2))[0]
+        return net.sent_frames[-1], after
+
+    sent, after = send(False)
+    if sent != frame:
+        problems.append('untagged transmit changed the frame')
+    sent, after = send(True)
+    if sent != frame[:12] + tag20 + frame[12:]:
+        problems.append(f'tagged transmit sent {sent[:18].hex()}')
+    if after != (frame, len(frame)):
+        problems.append('the frame was not put back after a tagged transmit')
+    for label, arriving, expected in (('VLAN 20', frame[:12] + tag20 + frame[12:], frame),
+                                      ('untagged', frame, None),
+                                      ('VLAN 30', frame[:12] + struct.pack('>HH', 0x8100, 30) + frame[12:], None)):
+        net.queue = [(0, arriving)]
+        tester.call(receive)
+        n = tester.uc.reg_read(UC_ARM_REG_R0)
+        n = n - (1 << 32) if n >= 1 << 31 else n
+        got = bytes(tester.uc.mem_read(FRAME, max(n, 0)))
+        if (expected is None and n != 0) or (expected is not None and (n != len(expected) or got != expected)):
+            problems.append(f'{label} frame received as {n} bytes')
+    return problems
+
+
 def check_ping_tick(image, sram, symbols):
     """The 1 ms tick's vendor PING/SCAN network work (0x08015114(4)): never in Ping monitor (state 11),
     still for IP SCAN (state 12)."""
@@ -1064,6 +1143,84 @@ def check_port_mark(fb):
                       ('4', (220, 4, 236, 12))):
         if pixels(*box) & {GREEN, VENDOR_PANEL}:
             problems.append(f'arrow {name} drawn')
+    return problems
+
+
+# ---- VLAN test (tools.h) --------------------------------------------------------------
+
+TOOL_VLAN = 1
+ACTION_UP, ACTION_DOWN, ACTION_LEFT, ACTION_RIGHT = 2, 3, 4, 5  # lpm_home_key's actions, as lpm_link_key gets them
+VLAN_20 = [ACTION_LEFT, ACTION_UP, ACTION_UP, ACTION_RIGHT, ACTION_DOWN]  # from VLAN 0001: tens to 2, ones to 0
+
+TOOL_SCENARIOS = {
+    # name -> (tool, network model settings, actions before M, checks)
+    'vlan-trunk': (TOOL_VLAN, dict(trunk={20}), VLAN_20,
+                   dict(steps=['PASS'] * 6, vlan=20, drawn=['VLAN ID', 'tagged'])),
+    'vlan-not-carried': (TOOL_VLAN, dict(trunk={30}), VLAN_20,
+                         dict(steps=['PASS', 'FAIL'] + ['SKIPPED'] * 4, vlan=20)),
+}
+
+
+def run_tool_scenario(image, sram, symbols, entries, tool, settings, actions, checks, out, name):
+    """Select the tool on the home list, open it (nothing may run), edit with the arrows, press M, and draw
+    the result. Returns the problems."""
+    open_, frame, draw, run = entries
+    key = symbols['lpm_home_key'] & ~1
+    tester = LinkTester(image, sram, symbols['text'] & ~1)
+    for base, size in ((0x40000000, 0x30000), (0x50000000, 0x10000)):  # the key path touches timers and GPIO
+        tester.uc.mem_map(base, size)
+    tester.uc.mem_write(KEY_QUEUE, struct.pack('<I', 0x20001000))
+    # The home list left on the tool (lpm_home_key sets both), VLAN 1 with the ones digit selected.
+    tester.uc.mem_write(TOOLS, struct.pack('<IIHHBBBBB', TOOLS_MAGIC, 0, 0, 1, 5 + tool, 0xEE, 3, 0, 0))
+    tester.uc.mem_write(MENU_SELECTION, bytes([8]))
+    tester.net = net = Network(tester, **settings)
+    before = {region: bytes(tester.uc.mem_read(*region)) for region in (IP_CONFIG, CUST_INFO)}
+    problems = []
+    tester.call(open_)
+    if net.us:
+        problems.append('the network was used before M')
+    if tester.uc.mem_read(TOOLS + 13, 1)[0] != tool:
+        problems.append(f'opened tool {tester.uc.mem_read(TOOLS + 13, 1)[0]}')
+    tester.call(frame)
+    tester.call(draw)
+    P.png(out / f'{name}-waiting.png', tester.fb, P.W, P.H)
+    for action in actions:
+        tester.call(key, action)
+    tester.drawn.clear()
+    try:
+        tester.call(run)  # M (event 0x0B)
+    except SystemExit as error:
+        problems.append(f'run: {error}')
+    tester.call(frame)
+    tester.call(draw)
+    P.png(out / f'{name}.png', tester.fb, P.W, P.H)
+    problems += list(net.errors)
+    tools = struct.unpack('<IIHHBBBBB', bytes(tester.uc.mem_read(TOOLS, 17)))
+    if tools[1] == TAGGING_MAGIC:
+        problems.append('still tagging after the run')
+    if tools[7]:
+        problems.append('the run is still marked running')
+    if tester.uc.mem_read(NET_BUSY, 1)[0]:
+        problems.append('network busy flag left set')
+    if net.keys_dropped:
+        problems.append(f'{net.keys_dropped} key presses dropped')
+    for region, old in before.items():
+        if bytes(tester.uc.mem_read(*region)) != old:
+            problems.append(f'{region[0]:#010x} changed: nothing may be saved')
+    if tool == TOOL_VLAN:
+        state = read_state(tester.uc)
+        steps = [state['steps'][r] for r in IPV4_ROWS]
+        if steps != checks['steps']:
+            problems.append(f'steps {steps}')
+        if tools[3] != checks['vlan']:
+            problems.append(f'VLAN {tools[3]}')
+        # Our own frames (ARP replies, pings, DNS) follow an address; each must carry the VLAN.
+        if set(net.vlans_sent) - {checks['vlan']} or (steps[1] == 'PASS' and not net.vlans_sent):
+            problems.append(f'frames tagged {sorted(set(net.vlans_sent))}')
+        if not net.dhcp_vlans or set(net.dhcp_vlans) != {checks['vlan']}:
+            problems.append(f'DHCP on VLANs {net.dhcp_vlans}')
+    drawn = ' | '.join(tester.drawn)
+    problems += [f'"{text}" not drawn' for text in checks.get('drawn', []) if text not in drawn]
     return problems
 
 
@@ -1230,11 +1387,24 @@ def main():
         print(f'{name:28} {seconds:6.1f} s  {status}')
         if problems:
             failures.append(name)
+    if not args.only or 'vlan-wrappers' in args.only:
+        problems = check_vlan_wrappers(image, sram, symbols)
+        print(f'{"vlan-wrappers":28} {"ok" if not problems else "FAIL: " + "; ".join(problems)}')
+        if problems:
+            failures.append('vlan-wrappers')
     if not args.only or 'ping-tick' in args.only:
         problems = check_ping_tick(image, sram, symbols)
         print(f'{"ping-tick":28} {"ok" if not problems else "FAIL: " + "; ".join(problems)}')
         if problems:
             failures.append('ping-tick')
+    for name, (tool, settings, actions, checks) in TOOL_SCENARIOS.items():
+        if args.only and name not in args.only:
+            continue
+        problems = run_tool_scenario(image, sram, symbols, (open_, frame, draw, run), tool, settings, actions,
+                                     checks, args.out, name)
+        print(f'{name:28} {"ok" if not problems else "FAIL: " + "; ".join(problems)}')
+        if problems:
+            failures.append(name)
     for name, (settings, expected, fragments) in SWITCH_SCENARIOS.items():
         if args.only and name not in args.only:
             continue
@@ -1245,7 +1415,7 @@ def main():
         if problems:
             failures.append(name)
     print(f'Deepest stack use: {deepest} bytes')
-    total = len(args.only) if args.only else 2 * (len(SCENARIOS) + len(SWITCH_SCENARIOS)) + len(PING_SCENARIOS)
+    total = len(args.only) if args.only else 2 * (len(SCENARIOS) + len(SWITCH_SCENARIOS) + len(TOOL_SCENARIOS)) + len(PING_SCENARIOS)
     print(f'Wrote {total} screens to {args.out}/')
     return 1 if failures else 0
 

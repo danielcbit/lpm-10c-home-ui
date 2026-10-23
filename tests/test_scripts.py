@@ -354,7 +354,7 @@ class PatchedImageTests(unittest.TestCase):
         # The 1 s tick skips the QC count command: bne -> b, same offset.
         self.assertEqual((self.vendor[0x1A30C:0x1A30E], patched[0x1A30C:0x1A30E]), (b'\x04\xd1', b'\x04\xe0'))
         home = (ROOT / 'src' / 'firmware_patch' / 'home_ui.c').read_text()
-        self.assertIn('{"Link status", &lpm_icon_ethernet, 4}', home)
+        self.assertIn('{"Link status", &lpm_icon_ethernet, 4, TOOL_LINK}', home)
         self.assertNotIn('QC test', home)
 
     def test_vendor_drawing_routines_branch_to_the_theme(self):
@@ -423,6 +423,25 @@ class PatchedImageTests(unittest.TestCase):
         self.assertEqual(self.vendor[0x801378E - b.BASE:0x801378E - b.BASE + 2], b'\x70\x47')
         home = (ROOT / 'src' / 'firmware_patch' / 'home_ui.c').read_text()
         self.assertIn('"Ping monitor"', home)
+
+    def test_added_network_tools_share_the_qc_slot_and_tag_through_wrappers(self):
+        try:
+            build_patched_image.find_tool('ld.lld')
+        except SystemExit:
+            self.skipTest('clang or lld not installed')
+        b = build_patched_image
+        home = (ROOT / 'src' / 'firmware_patch' / 'home_ui.c').read_text()
+        # A new item, replacing no vendor tool: every vendor slot 0-9 is still listed.
+        self.assertIn('{"VLAN test", &lpm_icon_vlan, 4, TOOL_VLAN}', home)
+        for slot in range(10):
+            self.assertRegex(home, rf'&lpm_icon_\w+, {slot}, ')
+        # The vendor DHCP and ARP routines call transmit and receive at exactly these sites, now the wrappers.
+        patched = b.apply_patches(self.vendor, b.patch_list('home-ui'))
+        for name, sites in b.VLAN_CALLS.items():
+            for site, vendor_target in sites:
+                self.assertEqual(self.vendor[site:site + 4], b.thumb_branch(site, vendor_target - b.BASE, link=True),
+                                 f'{name} at {site + b.BASE:#x}')
+                self.assertNotEqual(patched[site:site + 4], self.vendor[site:site + 4], name)
 
     def test_chinese_pictures_are_removed(self):
         try:

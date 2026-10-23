@@ -74,6 +74,7 @@
 #include "lpm_theme.h"
 #include "net.h"
 #include "switch_port.h"
+#include "tools.h"
 
 /* The vendor image ends its RAM at 0x20011298 (the initial stack top); nothing
  * above it is ever addressed, and SRAM dumps show its power-up pattern intact.
@@ -98,8 +99,10 @@
 #define dm9051_read ((uint8_t (*)(int))0x08016A71u)
 #define dm9051_write ((void (*)(int, int))0x08016AE1u)
 #define wait_link ((int (*)(uint32_t))0x08022089u)
-#define receive ((int (*)(void))0x08022811u)
-#define transmit ((void (*)(void))0x080228B9u)
+#define vendor_receive ((int (*)(void))0x08022811u)
+#define vendor_transmit ((void (*)(void))0x080228B9u)
+#define receive lpm_vlan_receive /* tagged while a VLAN test runs */
+#define transmit lpm_vlan_transmit
 #define dhcp_send ((void (*)(int, uint32_t, const uint8_t *, const uint8_t *))0x0801FE39u)
 #define dhcp_wait ((int (*)(uint32_t, uint32_t, int, uint8_t *, uint8_t *, uint8_t *, uint8_t *))0x0801FFD5u)
 #define arp_request ((void (*)(const uint8_t *, const uint8_t *))0x0802144Du)
@@ -112,6 +115,10 @@
 #define KEY_DOWN 3
 #define KEY_LEFT 4
 #define KEY_RIGHT 5
+#define TPID_VLAN 0x8100
+#define VLAN_MAX 4094
+#define VLAN_DIGITS 4
+#define VLAN_FIELD_X 96
 #define NSR 1
 #define NCR 0
 #define RCR 5
@@ -413,29 +420,103 @@ static void detail(const link_state *s, int row, char *p)
 
 /* ---- screen (GUI task) -------------------------------------------------- */
 
-/* The rows of the tab shown: the checklist or the switch port. */
+/* ---- the lists --------------------------------------------------------------- */
+
+static void clear(link_state *s);
+
 static int switch_tab(void)
 {
     return SWITCH->tab != 0;
 }
 
+const char *lpm_verdict(unsigned step, uint16_t *colour)
+{
+    if (step > STEP_NONE)
+        step = LPM_STEP_PENDING;
+    *colour = verdict_colours[step];
+    return verdicts[step];
+}
+
+const char *lpm_link_row(int row, const char **verdict, uint16_t *colour, char *p)
+{
+    *verdict = lpm_verdict(LINK->step[row], colour);
+    detail(LINK, row, p);
+    return names[row];
+}
+
+static int link_count(void)
+{
+    return ROWS;
+}
+
+static int vlan_count(void)
+{
+    return ROW_IPV6; /* the IPv4 checks */
+}
+
+static int link_lines(int row)
+{
+    return detail_lines[row];
+}
+
+static uint8_t *link_top(void)
+{
+    return &LINK->top;
+}
+
+static int switch_count(void)
+{
+    return SWITCH_ROWS;
+}
+
+static int switch_lines(int row)
+{
+    return lpm_switch_lines[row];
+}
+
+static const char *switch_row(int row, const char **verdict, uint16_t *colour, char *p)
+{
+    *verdict = lpm_verdict(SWITCH->step[row], colour);
+    lpm_switch_detail(row, p);
+    return lpm_switch_names[row];
+}
+
+static uint8_t *switch_top(void)
+{
+    return &SWITCH->top;
+}
+
+static const row_list checklist = {link_count, link_lines, lpm_link_row, link_top};
+static const row_list vlan_list = {vlan_count, link_lines, lpm_link_row, link_top};
+static const row_list switch_list = {switch_count, switch_lines, switch_row, switch_top};
+
+/* The rows shown: the tool's, or in Link status the tab's. */
+static const row_list *list(void)
+{
+    switch (TOOLS->tool) {
+    case TOOL_VLAN:
+        return &vlan_list;
+    }
+    return switch_tab() ? &switch_list : &checklist;
+}
+
 static int rows(void)
 {
-    return switch_tab() ? SWITCH_ROWS : ROWS;
+    return list()->count();
 }
 
 static uint8_t *top_row(void)
 {
-    return switch_tab() ? &SWITCH->top : &LINK->top;
+    return list()->top();
 }
+
+/* ---- screen (GUI task) -------------------------------------------------- */
 
 static int row_height(int row)
 {
-    if (switch_tab())
-        return DETAIL_DY + 2 + LINE_PITCH * lpm_switch_lines[row];
-    return row == ROW_IPV6 ? HEADING_H : DETAIL_DY + 2 + LINE_PITCH * detail_lines[row];
+    int lines = list()->lines(row);
+    return lines ? DETAIL_DY + 2 + LINE_PITCH * lines : HEADING_H;
 }
-
 /* 1 when row, drawn below the rows from top, ends above the footer. */
 static int fits(int top, int row)
 {
@@ -448,7 +529,7 @@ static int fits(int top, int row)
 static int last_top(void)
 {
     int top = 0;
-    while (!fits(top, rows() - 1))
+    while (rows() && !fits(top, rows() - 1))
         top++;
     return top;
 }
@@ -473,26 +554,24 @@ static const char *next_line(const char *s, char *out)
     return s;
 }
 
-static void draw_row(const link_state *s, int row, int y)
+static void draw_row(int row, int y)
 {
     char buffer[128], line[DETAIL_CHARS + 1];
-    int sw = switch_tab();
-    if (!sw && row == ROW_IPV6) {
-        text(&font_body, 10, y + 3, names[row], LPM_C_ACCENT, LPM_C_BG);
+    const char *verdict = "";
+    uint16_t colour = LPM_C_DIM;
+    const row_list *l = list();
+    buffer[0] = 0;
+    const char *name = l->row(row, &verdict, &colour, buffer);
+    int lines = l->lines(row);
+    if (!lines) { /* a heading */
+        text(&font_body, 10, y + 3, name, LPM_C_ACCENT, LPM_C_BG);
         fill(52, y + 6, DETAIL_W - 42, 1, LPM_C_RULE);
         return;
     }
-    unsigned step = sw ? SWITCH->step[row] : s->step[row];
-    if (step > STEP_NONE)
-        step = LPM_STEP_PENDING;
-    text_field(&font_body, 10, y, 140, 0, sw ? lpm_switch_names[row] : names[row], LPM_C_FG, LPM_C_BG);
-    text_field(&font_body, 150, y, 82, 1, verdicts[step], verdict_colours[step], LPM_C_BG);
-    if (sw)
-        lpm_switch_detail(row, buffer);
-    else
-        detail(s, row, buffer);
+    text_field(&font_body, 10, y, 140, 0, name, LPM_C_FG, LPM_C_BG);
+    text_field(&font_body, 150, y, 82, 1, verdict, colour, LPM_C_BG);
     const char *rest = buffer;
-    for (int i = 0; i < (sw ? lpm_switch_lines[row] : detail_lines[row]); i++) {
+    for (int i = 0; i < lines; i++) {
         rest = next_line(rest, line);
         text_field(&font_small, 10, y + DETAIL_DY + LINE_PITCH * i, DETAIL_W, 0, line, LPM_C_DIM, LPM_C_BG);
     }
@@ -513,6 +592,26 @@ static void draw_tabs(void)
     SWITCH->drawn_tab = SWITCH->tab;
 }
 
+/* The line under the title in the added tools, where Link status has its tabs:
+ * the VLAN to test, with the digit edited on the accent, or the tool's summary. */
+static void draw_heading(void)
+{
+    tools_state *t = TOOLS;
+    fill(0, LPM_CONTENT_Y, LPM_SCREEN_W, VIEW_Y - LPM_CONTENT_Y - 1, LPM_C_BG);
+    if (t->tool == TOOL_VLAN) {
+        text(&font_body, 10, LPM_CONTENT_Y + 4, "VLAN ID", LPM_C_DIM, LPM_C_BG);
+        for (int i = 0, place = 1000; i < VLAN_DIGITS; i++, place /= 10) {
+            char digit[2] = {(char)('0' + t->vlan / place % 10), 0};
+            int on = i == t->digit, x = VLAN_FIELD_X + i * 12;
+            fill(x, LPM_CONTENT_Y + 1, 12, 20, on ? LPM_C_ACCENT : LPM_C_FIELD);
+            text(&font_body, x + 2, LPM_CONTENT_Y + 4, digit, on ? LPM_C_ON_ACCENT : LPM_C_FG,
+                 on ? LPM_C_ACCENT : LPM_C_FIELD);
+        }
+        text(&font_small, VLAN_FIELD_X + 56, LPM_CONTENT_Y + 6, "tagged", LPM_C_DIM, LPM_C_BG);
+    }
+    fill(LPM_MARGIN, VIEW_Y - 1, LPM_SCREEN_W - 2 * LPM_MARGIN, 1, LPM_C_RULE);
+}
+
 /* Replaces the QC draw for message 0x0C: the rows that fit from the top one,
  * redrawn after every step, every scroll and every change of tab. */
 void lpm_link_draw(void)
@@ -520,7 +619,9 @@ void lpm_link_draw(void)
     link_state *s = LINK;
     if (SYS_STATE != LINK_SYS_STATE) /* Ping monitor uses the checks below, which post this message */
         return;
-    if (SWITCH->drawn_tab != SWITCH->tab) {
+    if (TOOLS->tool != TOOL_LINK) {
+        draw_heading();
+    } else if (SWITCH->drawn_tab != SWITCH->tab) {
         draw_tabs();
         s->drawn_top = 0xFF; /* no row on screen belongs to this tab */
     }
@@ -533,10 +634,14 @@ void lpm_link_draw(void)
         s->drawn_top = (uint8_t)top;
     }
     for (int row = top, y = ROW_Y0; row < rows() && fits(top, row); y += row_height(row++))
-        draw_row(s, row, y);
+        draw_row(row, y);
+    if (!rows()) {
+        fill(BAR_X, VIEW_Y, 3, LPM_FOOTER_Y - 4 - VIEW_Y, LPM_C_BG);
+        return;
+    }
     int track = LPM_FOOTER_Y - 4 - VIEW_Y, thumb = track * (rows() - end) / rows();
     fill(BAR_X, VIEW_Y, 3, track, LPM_C_RULE);
-    fill(BAR_X, VIEW_Y + (track - thumb) * top / end, 3, thumb, LPM_C_DIM);
+    fill(BAR_X, VIEW_Y + (end ? (track - thumb) * top / end : 0), 3, thumb, LPM_C_DIM);
 }
 
 /* Replaces the vendor tool frame for message 0x36, which set_sysState posts on
@@ -551,10 +656,14 @@ void lpm_tool_frame(void)
         vendor_tool_frame();
         return;
     }
+    static const char *const titles[] = {"Link status", "VLAN test"};
+    static const char *const footers[] = {"M run  UP/DN scroll  <> tab", "M run  UP/DN <> VLAN ID"};
+    int tool = TOOLS->tool;
     fill(0, LPM_CONTENT_Y, LPM_SCREEN_W, LPM_FOOTER_Y - LPM_CONTENT_Y, LPM_C_BG);
-    draw_header("Link status", STATUS_X);
-    draw_tabs();
-    draw_footer("M run  UP/DN scroll  <> tab", "BACK");
+    draw_header(titles[tool], STATUS_X);
+    if (tool == TOOL_LINK)
+        draw_tabs();
+    draw_footer(footers[tool], "BACK");
     LINK->drawn_top = *top_row(); /* the whole view was just cleared */
     lpm_link_draw();
     /* The vendor's own arrow, as its tools draw it on message 0x37, but only this one:
@@ -571,26 +680,51 @@ static void show(void)
     post_message(DRAW_MESSAGE, 0, 0);
 }
 
-/* UP, DOWN, LEFT or RIGHT in Link status (events 2 to 5, through lpm_home_key). */
+/* UP or DOWN on the VLAN digit under the cursor, kept within 1-4094. */
+static void step_vlan(tools_state *t, int up)
+{
+    static const uint16_t places[VLAN_DIGITS] = {1000, 100, 10, 1};
+    unsigned place = places[t->digit], digit = t->vlan / place % 10, top = place == 1000 ? 4 : 9;
+    digit = up ? (digit == top ? 0 : digit + 1) : (digit == 0 ? top : digit - 1);
+    unsigned vlan = t->vlan - t->vlan / place % 10 * place + digit * place;
+    t->vlan = (uint16_t)(vlan > VLAN_MAX ? VLAN_MAX : vlan ? vlan : 1);
+}
+
+/* UP, DOWN, LEFT or RIGHT in state 8 (events 2 to 5, through lpm_home_key): in
+ * VLAN test they edit the VLAN, which clears the last results; elsewhere UP and
+ * DOWN scroll, and LEFT and RIGHT change the Link status tab. */
 void lpm_link_key(int action)
 {
+    tools_state *t = TOOLS;
     uint8_t *top = top_row();
-    if (action == KEY_UP && *top > 0)
+    if (t->tool == TOOL_VLAN && !t->running) {
+        if (action == KEY_LEFT || action == KEY_RIGHT) {
+            t->digit = (uint8_t)((t->digit + (action == KEY_RIGHT ? 1 : VLAN_DIGITS - 1)) % VLAN_DIGITS);
+        } else {
+            step_vlan(t, action == KEY_UP);
+            uint8_t drawn = LINK->drawn_top;
+            clear(LINK);
+            LINK->drawn_top = drawn;
+        }
+    } else if (action == KEY_UP && *top > 0) {
         (*top)--;
-    else if (action == KEY_DOWN && *top < last_top())
+    } else if (action == KEY_DOWN && *top < last_top()) {
         (*top)++;
-    else if (action == KEY_LEFT || action == KEY_RIGHT)
+    } else if (t->tool == TOOL_LINK && (action == KEY_LEFT || action == KEY_RIGHT)) {
         SWITCH->tab = action == KEY_RIGHT;
+    }
     show();
 }
 
 static void begin(link_state *s, int row)
 {
     s->step[row] = LPM_STEP_RUNNING;
-    if (row < s->top)
-        s->top = (uint8_t)row;
-    while (!fits(s->top, row))
-        s->top++;
+    if (TOOLS->tool <= TOOL_VLAN) { /* the checklist is shown: follow the check running */
+        if (row < s->top)
+            s->top = (uint8_t)row;
+        while (!fits(s->top, row))
+            s->top++;
+    }
     show();
 }
 
@@ -1231,18 +1365,19 @@ static void clear(link_state *s)
         b[i] = 0;
 }
 
-/* M in Link status (event 0x0B): the checks, or on the second tab the switch port. */
-void lpm_link_run(void)
+/* The checks; in VLAN test only the IPv4 ones, every frame tagged. */
+static void run_checks(int vlan)
 {
     link_state *s = LINK;
-    if (switch_tab()) {
-        lpm_switch_run();
-        return;
-    }
+    tools_state *t = TOOLS;
     uint8_t drawn = s->drawn_top; /* still on screen */
     clear(s);
     s->drawn_top = drawn;
     show();
+    if (vlan) {
+        t->tag = t->vlan;
+        t->tagging = TAGGING_MAGIC;
+    }
     NET_BUSY = 1;
     if (check_link(s)) {
         if (check_address(s) && check_arp(s)) {
@@ -1250,23 +1385,89 @@ void lpm_link_run(void)
             check_internet(s);
             check_dns(s);
         }
-        check_ipv6(s);
+        if (!vlan)
+            check_ipv6(s);
         while (!fits(s->top, rows() - 1)) /* the end of the list, whichever checks ran */
             s->top++;
     }
     NET_BUSY = 0;
+    t->tagging = 0;
     for (int row = 0; row < ROWS; row++)
         if (s->step[row] == LPM_STEP_PENDING)
             s->step[row] = LPM_STEP_SKIPPED;
     show();
 }
 
-/* M on the Link status item (event 6): enter state 8 and wait for M. */
+/* M in state 8 (event 0x0B): the open tool's run. */
+void lpm_link_run(void)
+{
+    tools_state *t = TOOLS;
+    if (t->tool == TOOL_LINK && switch_tab()) {
+        lpm_switch_run();
+    } else {
+        run_checks(t->tool == TOOL_VLAN);
+    }
+}
+
+/* M on a home item of the QC slot (event 6): enter state 8 with the tool the
+ * home list shows, waiting for M. */
 void lpm_link_open(void)
 {
+    tools_state *t = TOOLS;
+    int tool = lpm_home_tool();
     clear(LINK); /* before set_sysState, whose frame message draws the state */
     lpm_switch_reset();
+    t->tool = (uint8_t)tool;
+    t->running = t->stop = 0;
+    t->tagging = 0;
+    if (t->vlan < 1 || t->vlan > VLAN_MAX) /* the power-up pattern */
+        t->vlan = 1;
+    if (t->digit >= VLAN_DIGITS)
+        t->digit = VLAN_DIGITS - 1;
     set_sys_state(LINK_SYS_STATE);
+}
+
+/* ---- 802.1Q tagging --------------------------------------------------------- */
+
+/* The vendor transmit and receive, as everything here and the vendor DHCP and
+ * ARP routines reach them (scripts/build_patched_image.py, VLAN_CALLS): while a
+ * VLAN test runs each frame sent carries the tag, and only frames received with
+ * the VLAN's tag are passed on, untagged. Otherwise both pass straight through. */
+static int tagging(void)
+{
+    return TOOLS->tagging == TAGGING_MAGIC;
+}
+
+void lpm_vlan_transmit(void)
+{
+    uint8_t *f = FRAME;
+    int n = FRAME_LEN;
+    if (!tagging() || n < 14 || n > MAX_FRAME) {
+        vendor_transmit();
+        return;
+    }
+    for (int i = n - 1; i >= 12; i--)
+        f[i + 4] = f[i];
+    put16(f + 12, TPID_VLAN);
+    put16(f + 14, TOOLS->tag);
+    FRAME_LEN = (uint16_t)(n + 4);
+    vendor_transmit();
+    for (int i = 12; i < n; i++) /* as it was: a caller may send it again */
+        f[i] = f[i + 4];
+    FRAME_LEN = (uint16_t)n;
+}
+
+int lpm_vlan_receive(void)
+{
+    uint8_t *f = FRAME;
+    int n = vendor_receive();
+    if (!tagging() || n <= 0)
+        return n;
+    if (n < 18 || get16(f + 12) != TPID_VLAN || (get16(f + 14) & 0x0FFF) != TOOLS->tag)
+        return 0; /* untagged or another VLAN's: not an answer on this one */
+    for (int i = 12; i < n - 4; i++)
+        f[i] = f[i + 4];
+    return n - 4;
 }
 
 /* ---- for Ping monitor (ping_monitor.c, key task) ---------------------------- */

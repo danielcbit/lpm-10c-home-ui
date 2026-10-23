@@ -40,7 +40,7 @@ IP scan, settings) are the vendor's own code. They are reached from the
 new home screen, and (since the next release) drawn in its theme.
 
 **Home screen**
-- One scrolling list of the ten tools, each with an icon and a plain name,
+- One scrolling list of the tools, each with an icon and a plain name,
   instead of the vendor's three pages of 2×2 tiles. UP/DOWN select, M opens.
 - English only, drawn with the Terminus bitmap font (6×12 and 8×16), which
   is crisper on the 240×320 panel. The Chinese pictures left on English
@@ -95,6 +95,12 @@ the address: UP/DOWN change a digit, LEFT/RIGHT move, M uses it and BACK
 cancels. Each run gets its own address by DHCP; it stops with NO LINK if the
 cable is pulled, and keeps the tester on while it runs.
 
+**VLAN test** (unreleased, new home item). Runs the six IPv4 Link status
+checks (link, DHCP, gateway ARP and ping, Internet ping, DNS) with every frame
+tagged with a VLAN you choose (LEFT/RIGHT pick a digit, UP/DOWN change it). It
+shows whether a trunk port carries that VLAN and whether it has DHCP and a
+working gateway. Replies from the untagged native VLAN don't count.
+
 **Theme for the vendor tools** (unreleased). Every vendor screen now uses the
 home screen's colours and Terminus font. Tool titles use the home list names.
 Layouts and behaviour are unchanged.
@@ -118,11 +124,15 @@ simulated network. The display and fonts are the tester's own, pixel for pixel.
 
 | Home | Home, scrolled | Link status: IPv4 | Link status: IPv6 router |
 | --- | --- | --- | --- |
-| ![Home screen](docs/images/home.png) | ![Home screen scrolled to Link status](docs/images/home-scrolled.png) | ![IPv4 checks all passing](docs/images/link-status-ipv4.png) | ![DNS answer and IPv6 router advertisement](docs/images/link-status-ipv6-router.png) |
+| ![Home screen](docs/images/home.png) | ![Home screen scrolled to the network tools](docs/images/home-scrolled.png) | ![IPv4 checks all passing](docs/images/link-status-ipv4.png) | ![DNS answer and IPv6 router advertisement](docs/images/link-status-ipv6-router.png) |
 
 | Link status: SLAAC | Link status: DHCPv6 lease | No Internet access |
 | --- | --- | --- |
 | ![IPv6 end of the list](docs/images/link-status-ipv6.png) | ![DHCPv6 address leased](docs/images/link-status-dhcpv6.png) | ![Internet ping and DNS failing](docs/images/link-status-no-internet.png) |
+
+| VLAN test |
+| --- |
+| ![IPv4 checks on VLAN 20](docs/images/vlan-test.png) |
 
 | Ping monitor | Ping target address | Switch port: LLDP | Switch port: end | Cable map, themed |
 | --- | --- | --- | --- | --- |
